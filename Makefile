@@ -3,7 +3,7 @@
 all: llc-cli
 
 llc-cli: llc-cli.c
-	${CC} -o $@ $<
+	${CC} -o $@ -lreadline $<
 
 clean:
 	rm -rf llc-cli *~
