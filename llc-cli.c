@@ -43,15 +43,19 @@ struct sexpr { // atom or list
 #define SEXPR_INT 2
 #define SEXPR_STR 3
 
+struct nsnode;
+typedef int (*ns_callback)(struct nsnode*, struct sexpr *old);
 
 struct nsnode { // namespace node
     struct nsnode *parent, *children;
     struct nsnode *next, *prev;
     char *relname;
     struct sexpr *val;
+    ns_callback set_cb;
 };
 
 struct nsnode *nsroot;
+
 
 // ----------------------------------------------------------------------
 
@@ -156,8 +160,13 @@ sexpr_free(struct sexpr *e)
         return;
     if (e->type == SEXPR_STR && e->s.strval)
         free(e->s.strval);
-    // should also check other assignments and remove them
-    // if (n->val.type == SEXPR_LST ...
+    else if (e->type == SEXPR_LST) {
+        while (e->s.list) {
+            struct sexpr *e2 = e->s.list->next;
+            sexpr_free(e->s.list);
+            e->s.list = e2;
+        }
+    }
     free(e);
 }
 
@@ -185,8 +194,12 @@ ns_addChild(struct nsnode *parent, char *name)
 void
 ns_setExpr(struct nsnode *n, struct sexpr *e)
 {
-    sexpr_free(n->val);
+    struct sexpr *old = n->val;
+    
     n->val = e;
+    if (n->set_cb)
+        (n->set_cb)(n, old);
+    sexpr_free(old);
 }
 
 void
@@ -414,3 +427,5 @@ main(int argc, char **argv)
     printf("\n* llc-cli ends here.\n");
     return 0;
 }
+
+// eof
