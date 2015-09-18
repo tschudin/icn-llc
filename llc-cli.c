@@ -59,6 +59,17 @@ struct nsnode *nsroot;
 
 // ----------------------------------------------------------------------
 
+#define RPC_OK   0
+#define RPC_FAIL 1
+
+#define RETURN_RESULT(C,S) do { \
+        char *cp = S ? S : "";                     \
+        if (C == RPC_OK) printf("OK (%s)\n", cp);  \
+        else printf("FAIL (%s)\n", cp);            \
+    } while (0)
+
+// ----------------------------------------------------------------------
+
 struct sexpr*
 sexpr_parse(char **s)
 {
@@ -210,25 +221,34 @@ ns_rmNode(struct nsnode *n)
 struct nsnode*
 ns_find(char *path)
 {
-    char *p2 = strdup(path), *s;
+    char *p2, *s;
     struct nsnode *n = nsroot->children, *start;
 
+    if (!path)
+        return NULL;
+    p2 = strdup(path);
     s = strtok(p2, "/");
+
     start = n;
     do {
 check:
         if (!strcmp(s, n->relname)) {
             s = strtok(NULL, "/");
-            if (!s)
+            if (!s) {
+                free(p2);
                 return n;
+            }
             n = n->children;
-            if (!n)
+            if (!n) {
+                free(p2);
                 return NULL;
+            }
             start = n;
             goto check;
         }
         n = n->next;
     } while (n != start);
+    free(p2);
     return NULL;
 }
 
@@ -271,8 +291,8 @@ help(FILE *f)
             "  mk dev PARAMS\n"
             "  mk key FILE\n"
             "  mk link LOCALDEV REMOTEDEV\n"
-            "  mk pipe LINK LOCALSRVC REMOTESRVC\n"
-            "  mk srvc DEV LOCALSRVC\n"
+            "  mk pipe LINK LOCALDEV REMOTESRVC\n"
+            "  mk srvc SRVCNAME LOCALDEV\n"
             "  get NAME\n"
             "  set NAME VALUE\n"
             "  rm NAME\n"
@@ -288,7 +308,7 @@ help(FILE *f)
 void
 cmd_mk(char *line)
 {
-    fprintf(stderr, "mk not implemented\n");
+    RETURN_RESULT(RPC_FAIL, "mk not implemented");
 }
 
 void
@@ -298,13 +318,16 @@ cmd_get(char *line)
     char *name = strtok(NULL, " \t\n");
     struct nsnode *n = ns_find(name);
 
-    if (!n)
-        fprintf(stderr, "## no such name\n");
-    else if (!n->val)
-        fprintf(stderr, "## no value for this name\n");
-    else {
-        if (sexpr_toStr(buf, n->val))
-            printf("%s\n", buf);
+    if (!n) {
+        RETURN_RESULT(RPC_FAIL, "no such name");
+    } else if (!n->val) {
+        RETURN_RESULT(RPC_FAIL, "no value for this name");
+    } else {
+        if (sexpr_toStr(buf, n->val)) {
+            RETURN_RESULT(RPC_OK, buf);
+        } else {
+            RETURN_RESULT(RPC_OK, NULL);
+        }
     }
 }
 
@@ -313,28 +336,28 @@ cmd_set(char *line)
 {
     char *name = strtok(NULL, " \t\n");
     char *expr = strtok(NULL, "\n");
-    struct sexpr *e = sexpr_fromStr(expr);
+    struct sexpr *e = expr ? sexpr_fromStr(expr) : NULL;
     struct nsnode *n = ns_find(name);
 
     if (!n) {
-        fprintf(stderr, "## no such name\n");
+        RETURN_RESULT(RPC_FAIL, "no such name");
         sexpr_free(e);
-    } else if (!e)
-        fprintf(stderr, "## invalid expression\n");
-    else
+    } else if (!e) {
+        RETURN_RESULT(RPC_FAIL, "invalid expression");
+    } else
         ns_setExpr(n, e);
 }
 
 void
 cmd_rm(char *line)
 {
-    fprintf(stderr, "rm not implemented\n");
+    RETURN_RESULT(RPC_FAIL, "rm not implemented");
 }
 
 void
 cmd_rpc(char *line)
 {
-    fprintf(stderr, "rpc not implemented\n");
+    RETURN_RESULT(RPC_FAIL, "rpc not implemented");
 }
 
 void
@@ -364,13 +387,13 @@ cmd_list(int lev, struct nsnode *n)
 void
 cmd_dump(char *line)
 {
-    fprintf(stderr, "dump not implemented\n");
+    RETURN_RESULT(RPC_FAIL, "dump not implemented");
 }
 
 void
 cmd_peek(char *line)
 {
-    fprintf(stderr, "peek not implemented\n");
+    RETURN_RESULT(RPC_FAIL, "peek not implemented");
 }
 
 int
