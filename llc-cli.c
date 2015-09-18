@@ -33,9 +33,9 @@ struct sexpr { // atom or list
     char type;
     struct sexpr *next;
     union {
-	int intval;
-	char *strval;
-	struct sexpr *list;
+        struct sexpr *list;
+        int intval;
+        char *strval;
     } s;
 };
 
@@ -56,62 +56,112 @@ struct nsnode *nsroot;
 // ----------------------------------------------------------------------
 
 struct sexpr*
-sexpr_fromStr(char *s)
+sexpr_parse(char **s)
 {
-    char *cp = s;
-    struct sexpr *e = calloc(1, sizeof(struct sexpr));
+    struct sexpr *e;
 
-    while (isspace(*cp))
-	cp++;
-    if (isdigit(*cp)) {
-	e->type = SEXPR_INT;
-	e->s.intval = atoi(cp);
-	return e;
+    while (isspace(**s))
+        *s += 1;
+    if (**s == '\"') {
+        char *cp = *s;
+        *s += 1;
+        for (; **s && **s != '\"'; *s += 1);
+        e = calloc(1, sizeof(*e));
+        e->type = SEXPR_STR;
+        e->s.strval = calloc(1, *s - cp);
+        cp++;
+        memcpy(e->s.strval, cp, *s - cp);
+        if (**s == '\"')
+            *s += 1;
+        return e;
     }
-    if (*cp == '\"') {
-	cp++;
-	for (s = cp; s && *s != '\"'; s++);
-	e->type = SEXPR_STR;
-	e->s.strval = calloc(1, s - cp + 1);
-	memcpy(e->s.strval, cp, s - cp);
-	return e;
+    if (isdigit(**s)) {
+        int val = **s - '0';
+        *s += 1;
+        while (isdigit(**s)) {
+            val = 10*val + **s - '0';
+            *s += 1;
+        }
+        e = calloc(1, sizeof(*e));
+        e->type = SEXPR_INT;
+        e->s.intval = val;
+        return e;
     }
-    free(e);
+    if (**s == '(') {
+        struct sexpr *lst = calloc(1, sizeof(*lst)), *tail;
+
+        *s += 1;
+        lst->type = SEXPR_LST;
+        for (;;) {
+            e = sexpr_parse(s);
+            if (!e)
+                break;
+            if (!lst->s.list)
+                lst->s.list = e;
+            else
+                tail->next = e;
+            tail = e;
+        }
+        while (isspace(**s))
+            *s += 1;
+        if (**s != ')')
+            return NULL;
+        *s += 1;
+        return lst;
+    }
     return NULL;
 }
 
-char*
-sexpr_toStr(struct sexpr *e)
+struct sexpr*
+sexpr_fromStr(char *s)
 {
-    static char buf[1024];
+    char *cp = s;
+
+    return sexpr_parse(&cp);
+}
+
+int
+sexpr_toStr(char *buf, struct sexpr *e)
+{
+    char *start = buf;
 
     if (!e)
-	return NULL;
+        return 0;
     switch (e->type) {
     case SEXPR_INT:
-	sprintf(buf, "%d", e->s.intval);
-	break;
+        buf += sprintf(buf, "%d", e->s.intval);
+        break;
     case SEXPR_STR:
-	sprintf(buf, "\"%s\"", e->s.strval);
-	break;
+        buf += sprintf(buf, "\"%s\"", e->s.strval);
+        break;
+    case SEXPR_LST:
+        buf += sprintf(buf, "(");
+        for (e = e->s.list; e; e = e->next) {
+            buf += sexpr_toStr(buf, e);
+            if (e->next)
+                buf += sprintf(buf, " ");
+        }
+        buf += sprintf(buf, ")");
+        break;
     default:
-	return NULL;
+        return 0;
     }
-    return buf;
+    return buf - start;
 }
 
 void
 sexpr_free(struct sexpr *e)
 {
     if (!e)
-	return;
+        return;
     if (e->type == SEXPR_STR && e->s.strval)
-	free(e->s.strval);
+        free(e->s.strval);
     // should also check other assignments and remove them
     // if (n->val.type == SEXPR_LST ...
     free(e);
 }
 
+// ----------------------------------------------------------------------
 
 struct nsnode*
 ns_addChild(struct nsnode *parent, char *name)
@@ -121,13 +171,13 @@ ns_addChild(struct nsnode *parent, char *name)
     child->parent = parent;
     child->relname = strdup(name);
     if (!parent->children) {
-	child->next = child->prev = child;
-	parent->children = child;
+        child->next = child->prev = child;
+        parent->children = child;
     } else {
-	child->prev = parent->children->prev;
-	child->next = parent->children;
-	parent->children->prev->next = child;
-	parent->children->prev = child;
+        child->prev = parent->children->prev;
+        child->next = parent->children;
+        parent->children->prev->next = child;
+        parent->children->prev = child;
     }
     return child;
 }
@@ -145,7 +195,34 @@ ns_rmNode(struct nsnode *n)
 }
 
 struct nsnode*
-ns_init(void)
+ns_find(char *path)
+{
+    char *p2 = strdup(path), *s;
+    struct nsnode *n = nsroot->children, *start;
+
+    s = strtok(p2, "/");
+    start = n;
+    do {
+check:
+        if (!strcmp(s, n->relname)) {
+            s = strtok(NULL, "/");
+            if (!s)
+                return n;
+            n = n->children;
+            if (!n)
+                return NULL;
+            start = n;
+            goto check;
+        }
+        n = n->next;
+    } while (n != start);
+    return NULL;
+}
+
+// ----------------------------------------------------------------------
+
+struct nsnode*
+init(void)
 {
     struct nsnode *n = calloc(1, sizeof(struct nsnode)), *n2, *n3;
     struct sexpr *e;
@@ -169,55 +246,30 @@ ns_init(void)
     return n;
 }
 
-struct nsnode*
-ns_find(char *path)
-{
-    char *p2 = strdup(path), *s;
-    struct nsnode *n = nsroot->children, *start;
-
-    s = strtok(p2, "/");
-    start = n;
-    do {
-check:
-	if (!strcmp(s, n->relname)) {
-	    s = strtok(NULL, "/");
-	    if (!s)
-		return n;
-	    n = n->children;
-	    if (!n)
-		return NULL;
-	    start = n;
-	    goto check;
-	}
-	n = n->next;
-    } while (n != start);
-    return NULL;
-}
-
 void
 help(FILE *f)
 {
     if (!f)
-	f = stdout;
+        f = stdout;
 
     fprintf(f,
-	   "Available commands:\n"
-	    "  mk cert FILE\n"
-	    "  mk dev PARAMS\n"
-	    "  mk key FILE\n"
-	    "  mk link LOCALDEV REMOTEDEV\n"
-	    "  mk pipe LINK LOCALSRVC REMOTESRVC\n"
-	    "  mk srvc DEV LOCALSRVC\n"
+           "Available commands:\n"
+            "  mk cert FILE\n"
+            "  mk dev PARAMS\n"
+            "  mk key FILE\n"
+            "  mk link LOCALDEV REMOTEDEV\n"
+            "  mk pipe LINK LOCALSRVC REMOTESRVC\n"
+            "  mk srvc DEV LOCALSRVC\n"
             "  get NAME\n"
             "  set NAME VALUE\n"
             "  rm NAME\n"
             "  rpc LINK COMMAND\n\n"
-	    "  help\n"
-	    "  list\n"
+            "  help\n"
+            "  list\n"
             "  dump\n"
             "  peek OFFS LEN\n"
-	    "  quit\n"
-	);
+            "  quit\n"
+        );
 }
 
 void
@@ -229,15 +281,18 @@ cmd_mk(char *line)
 void
 cmd_get(char *line)
 {
+    char buf[1024];
     char *name = strtok(NULL, " \t\n");
     struct nsnode *n = ns_find(name);
 
     if (!n)
-	fprintf(stderr, "## no such name\n");
+        fprintf(stderr, "## no such name\n");
     else if (!n->val)
-	fprintf(stderr, "## no value for this name\n");
-    else
-	printf("%s\n", sexpr_toStr(n->val));
+        fprintf(stderr, "## no value for this name\n");
+    else {
+        if (sexpr_toStr(buf, n->val))
+            printf("%s\n", buf);
+    }
 }
 
 void
@@ -248,12 +303,13 @@ cmd_set(char *line)
     struct sexpr *e = sexpr_fromStr(expr);
     struct nsnode *n = ns_find(name);
 
-    if (!n)
-	fprintf(stderr, "## no such name\n");
-    else if (!e)
-	fprintf(stderr, "## invalid expression\n");
+    if (!n) {
+        fprintf(stderr, "## no such name\n");
+        sexpr_free(e);
+    } else if (!e)
+        fprintf(stderr, "## invalid expression\n");
     else
-	ns_setExpr(n, e);
+        ns_setExpr(n, e);
 }
 
 void
@@ -271,22 +327,24 @@ cmd_rpc(char *line)
 void
 cmd_list(int lev, struct nsnode *n)
 {
+    char buf[1024];
     struct nsnode *start = n;
     int i;
 
     do {
-	for (i = 0; i < lev; i++)
-	    printf("  ");
-	if (n->relname)
-	    printf("%s", n->relname);
-	if (n->children) {
-	    printf("/\n");
-	    cmd_list(lev+1, n->children);
-	} else if (n->val) {
-	    printf("=%s\n", sexpr_toStr(n->val));
-	} else
-	    printf("\n");
-	n = n->next;
+        for (i = 0; i < lev; i++)
+            printf("  ");
+        if (n->relname)
+            printf("%s", n->relname);
+        if (n->children) {
+            printf("/\n");
+            cmd_list(lev+1, n->children);
+        } else if (n->val) {
+            sexpr_toStr(buf, n->val);
+            printf("=%s\n", buf);
+        } else
+            printf("\n");
+        n = n->next;
     } while (n != start);
 }
 
@@ -305,48 +363,54 @@ cmd_peek(char *line)
 int
 main(int argc, char **argv)
 {
+    int linecnt = 0;
+
     printf("ICN-LLC command line interface\n\n");
 
     using_history();
-
-    nsroot = ns_init();
+    nsroot = init();
 
     for (;;) {
-	char *verb, *line = readline("llc> ");
+        char *verb, *line, prompt[20];
+        sprintf(prompt, "llc %d> ", linecnt++);
+        line = readline(prompt);
 
-	if (!line)
-	    continue;
-	add_history(line);
+        if (!line)
+            break;
+        for (verb = line; isspace(*verb); verb++);
+        if (!*verb) // empty line
+            continue;
 
-	verb = strtok(line, " \t\n");
-	if (!strcmp(verb, "mk"))
-	    cmd_mk(line);
-	else if (!strcmp(verb, "get"))
-	    cmd_get(line);
-	else if (!strcmp(verb, "set"))
-	    cmd_set(line);
-	else if (!strcmp(verb, "rm"))
-	    cmd_rm(line);
-	else if (!strcmp(verb, "rpc"))
-	    cmd_rpc(line);
-	else if (!strcmp(verb, "help"))
-	    help(NULL);
-	else if (!strcmp(verb, "list"))
-	    cmd_list(0, nsroot);
-	else if (!strcmp(verb, "dump"))
-	    cmd_dump(line);
-	else if (!strcmp(verb, "peek"))
-	    cmd_peek(line);
-	else if (!strcmp(verb, "quit"))
-	    break;
-	else {
-	    fprintf(stderr, "unknown verb \"%s\", "
-		    "see full list with \"help\"\n", verb);
-	}
+        add_history(line);
 
-	free(line);
+        verb = strtok(line, " \t\n");
+        if (!strcmp(verb, "mk"))
+            cmd_mk(line);
+        else if (!strcmp(verb, "get"))
+            cmd_get(line);
+        else if (!strcmp(verb, "set"))
+            cmd_set(line);
+        else if (!strcmp(verb, "rm"))
+            cmd_rm(line);
+        else if (!strcmp(verb, "rpc"))
+            cmd_rpc(line);
+        else if (!strcmp(verb, "help"))
+            help(NULL);
+        else if (!strcmp(verb, "list"))
+            cmd_list(0, nsroot);
+        else if (!strcmp(verb, "dump"))
+            cmd_dump(line);
+        else if (!strcmp(verb, "peek"))
+            cmd_peek(line);
+        else if (!strcmp(verb, "quit"))
+            break;
+        else {
+            fprintf(stderr, "unknown verb \"%s\", "
+                    "see full list with \"help\"\n", verb);
+        }
+        free(line);
     }
 
-    printf("* llc-cli ends here.\n");
+    printf("\n* llc-cli ends here.\n");
     return 0;
 }
