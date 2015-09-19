@@ -55,7 +55,7 @@ struct nsnode { // namespace node
 };
 
 struct nsnode *nsroot;
-
+char namebuf[512];
 
 // ----------------------------------------------------------------------
 
@@ -252,6 +252,61 @@ check:
     return NULL;
 }
 
+char*
+ns_node2path(char *buf, int len, struct nsnode *n)
+{
+    char *cp;
+
+    len--;
+    cp =  buf + len;
+    *cp = '\0';
+    
+    while (n) {
+        if (n->relname) {
+            int i = strlen(n->relname);
+            if (len >= i) {
+                cp -= i;
+                len -= i;
+                memcpy(cp, n->relname, i);
+            }
+        }
+        if (n->parent && len > 0) {
+            cp--;
+            len--;
+            *cp = '/';
+        }
+        n = n->parent;
+    }
+    return buf + len;
+}
+
+// ----------------------------------------------------------------------
+
+#define RINGSIZE 5
+char* ringbuf[RINGSIZE];
+int ringndx, ringoffs;
+
+void
+ring_addName(int linecnt, char *name)
+{
+    if (ringbuf)
+        free(ringbuf[ringndx]);
+    if (name)
+        ringbuf[ringndx] = strdup(name);
+    else
+        ringbuf[ringndx] = NULL;
+    ringoffs = linecnt;
+    ringndx = (ringndx + 1) % RINGSIZE;
+}
+
+char*
+ring_getName(int linecnt)
+{
+    if (linecnt > ringoffs || linecnt <= (ringoffs - RINGSIZE))
+        return NULL;
+    return ringbuf[(ringndx - 1 + RINGSIZE - ringoffs + linecnt) % RINGSIZE];
+}
+
 // ----------------------------------------------------------------------
 
 struct nsnode*
@@ -311,11 +366,10 @@ cmd_mk(char *line)
     RETURN_RESULT(RPC_FAIL, "mk not implemented");
 }
 
-void
+char*
 cmd_get(char *line)
 {
-    char buf[1024];
-    char *name = strtok(NULL, " \t\n");
+    char buf[512], *name = strtok(NULL, " \t\n");
     struct nsnode *n = ns_find(name);
 
     if (!n) {
@@ -328,10 +382,12 @@ cmd_get(char *line)
         } else {
             RETURN_RESULT(RPC_OK, NULL);
         }
+        return ns_node2path(namebuf, sizeof(namebuf), n);
     }
+    return NULL;
 }
 
-void
+char*
 cmd_set(char *line)
 {
     char *name = strtok(NULL, " \t\n");
@@ -344,8 +400,12 @@ cmd_set(char *line)
         sexpr_free(e);
     } else if (!e) {
         RETURN_RESULT(RPC_FAIL, "invalid expression");
-    } else
+    } else {
         ns_setExpr(n, e);
+        RETURN_RESULT(RPC_OK, NULL);
+        return ns_node2path(namebuf, sizeof(namebuf), n);
+    }
+    return NULL;
 }
 
 void
@@ -407,25 +467,26 @@ main(int argc, char **argv)
     nsroot = init();
 
     for (;;) {
-        char *verb, *line, prompt[20];
-        sprintf(prompt, "llc %d> ", linecnt++);
+        char *verb, *line, prompt[20], *name;
+        sprintf(prompt, "llc %d> ", linecnt);
         line = readline(prompt);
 
         if (!line)
             break;
         for (verb = line; isspace(*verb); verb++);
-        if (!*verb) // empty line
+        if (!*verb || *verb == '#') // empty line or comment
             continue;
 
         add_history(line);
 
         verb = strtok(line, " \t\n");
+        name = NULL;
         if (!strcmp(verb, "mk"))
             cmd_mk(line);
         else if (!strcmp(verb, "get"))
-            cmd_get(line);
+            name = cmd_get(line);
         else if (!strcmp(verb, "set"))
-            cmd_set(line);
+            name = cmd_set(line);
         else if (!strcmp(verb, "rm"))
             cmd_rm(line);
         else if (!strcmp(verb, "rpc"))
@@ -445,6 +506,17 @@ main(int argc, char **argv)
                     "see full list with \"help\"\n", verb);
         }
         free(line);
+
+        ring_addName(linecnt, name);
+
+        {
+            int i;
+            for (i = -10; i <= 0; i++) {
+                char *s = ring_getName(linecnt + i);
+                printf(" $%d is %s\n", linecnt + i, s);
+            }
+        }
+        linecnt++;
     }
 
     printf("\n* llc-cli ends here.\n");
