@@ -70,6 +70,8 @@ char namebuf[512];
 
 // ----------------------------------------------------------------------
 
+char* ring_expand(char *path);
+
 struct sexpr*
 sexpr_parse(char **s)
 {
@@ -79,8 +81,7 @@ sexpr_parse(char **s)
         *s += 1;
     if (**s == '\"') {
         char *cp = *s;
-        *s += 1;
-        for (; **s && **s != '\"'; *s += 1);
+        for (*s += 1; **s && **s != '\"'; *s += 1);
         e = calloc(1, sizeof(*e));
         e->type = SEXPR_STR;
         e->s.strval = calloc(1, *s - cp);
@@ -88,6 +89,7 @@ sexpr_parse(char **s)
         memcpy(e->s.strval, cp, *s - cp);
         if (**s == '\"')
             *s += 1;
+        e->s.strval = ring_expand(e->s.strval);
         return e;
     }
     if (isdigit(**s)) {
@@ -226,7 +228,7 @@ ns_find(char *path)
 
     if (!path)
         return NULL;
-    p2 = strdup(path);
+    p2 = ring_expand(strdup(path));
     s = strtok(p2, "/");
 
     start = n;
@@ -305,6 +307,39 @@ ring_getName(int linecnt)
     if (linecnt > ringoffs || linecnt <= (ringoffs - RINGSIZE))
         return NULL;
     return ringbuf[(ringndx - 1 + RINGSIZE - ringoffs + linecnt) % RINGSIZE];
+}
+
+
+char*
+ring_expand(char *str)
+{
+    // takes a malloced str, expands any $xx inside it, returns new buffer
+    int len, pos, pos$, ndx;
+
+    for (len = strlen(str)+1, pos = 0, ndx = -1; str[pos]; pos++) {
+        if (str[pos] == '$') {
+            pos$ = pos;
+            ndx = 0;
+        } else if (ndx >= 0) {
+            if (isdigit(str[pos]))
+                ndx = 10 * ndx + str[pos] - '0';
+            else {
+                char *cp = ring_getName(ndx);
+                if (cp) {
+                    int len2 = strlen(cp), len3;
+                    len3 = len + len2 - (pos - pos$);
+                    str = realloc(str, len3);
+                    memmove(str + pos$ + len2,
+                            str + pos, (len - 1 - pos));
+                    memcpy(str + pos$, cp, len2);
+                    pos = pos$ + len2;
+                }
+                ndx = -1;
+            }
+        }
+    }
+    
+    return str;
 }
 
 // ----------------------------------------------------------------------
