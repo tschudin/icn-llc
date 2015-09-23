@@ -57,21 +57,23 @@ struct nsnode { // namespace node
 struct nsnode *nsroot;
 char namebuf[512];
 
+char* ring_expand(char *path);
+
 // ----------------------------------------------------------------------
 
 #define RPC_OK   0
 #define RPC_FAIL 1
 
 #define RETURN_RESULT(C,S) do { \
-        char *cp = S ? S : "";                     \
-        if (C == RPC_OK) printf("OK (%s)\n", cp);  \
-        else printf("FAIL (%s)\n", cp);            \
+        char *CP = S ? S : "";                     \
+        if (C == RPC_OK) printf("OK (%s)\n", CP);  \
+        else printf("FAIL (%s)\n", CP);            \
     } while (0)
 
 // ----------------------------------------------------------------------
+// symbolic expression handling
 
-char* ring_expand(char *path);
-
+// parse a str containing a symbolic expression, return a new sexpr struct
 struct sexpr*
 sexpr_parse(char **s)
 {
@@ -129,6 +131,7 @@ sexpr_parse(char **s)
     return NULL;
 }
 
+// parse a str containing a symbolic expression, return a new sexpr struct
 struct sexpr*
 sexpr_fromStr(char *s)
 {
@@ -137,13 +140,15 @@ sexpr_fromStr(char *s)
     return sexpr_parse(&cp);
 }
 
+// write a sexpr struct into a string (malloced)
 int
-sexpr_toStr(char *buf, struct sexpr *e)
+sexpr_toStr(char *buf, int buflen, struct sexpr *e)
 {
     char *start = buf;
 
     if (!e)
         return 0;
+    // we should honor buflen ...
     switch (e->type) {
     case SEXPR_INT:
         buf += sprintf(buf, "%d", e->s.intval);
@@ -154,7 +159,7 @@ sexpr_toStr(char *buf, struct sexpr *e)
     case SEXPR_LST:
         buf += sprintf(buf, "(");
         for (e = e->s.list; e; e = e->next) {
-            buf += sexpr_toStr(buf, e);
+            buf += sexpr_toStr(buf, buflen, e);
             if (e->next)
                 buf += sprintf(buf, " ");
         }
@@ -166,6 +171,7 @@ sexpr_toStr(char *buf, struct sexpr *e)
     return buf - start;
 }
 
+// release (recursively) a sexpr struct
 void
 sexpr_free(struct sexpr *e)
 {
@@ -184,7 +190,9 @@ sexpr_free(struct sexpr *e)
 }
 
 // ----------------------------------------------------------------------
+// namespace mangement
 
+// add a new child node to a namespace node
 struct nsnode*
 ns_addChild(struct nsnode *parent, char *name)
 {
@@ -204,6 +212,7 @@ ns_addChild(struct nsnode *parent, char *name)
     return child;
 }
 
+// assign a new value to a namespace node, trigger the set callback
 void
 ns_setExpr(struct nsnode *n, struct sexpr *e)
 {
@@ -215,11 +224,13 @@ ns_setExpr(struct nsnode *n, struct sexpr *e)
     sexpr_free(old);
 }
 
+// remove a namespace node, trigger the destroy callback
 void
 ns_rmNode(struct nsnode *n)
 {
 }
 
+// walk the namespace as requested by the expanded path, return the node
 struct nsnode*
 ns_find(char *path)
 {
@@ -254,6 +265,46 @@ check:
     return NULL;
 }
 
+// extend the namespace as requested by the expanded path, return the node
+struct nsnode*
+ns_mkNode(char *path)
+{
+    char *p2, *s;
+    struct nsnode *parent = nsroot, *n = nsroot->children, *start;
+
+    if (!path)
+        return NULL;
+    p2 = ring_expand(strdup(path));
+    s = strtok(p2, "/");
+
+    start = n;
+    do {
+check:
+        if (!strcmp(s, n->relname)) {
+            s = strtok(NULL, "/");
+            if (!s) { // node already exists, return it
+                free(p2);
+                return n;
+            }
+            parent = n;
+            n = n->children;
+            if (!n)
+                break;
+            start = n;
+            goto check;
+        }
+        n = n->next;
+    } while (n != start);
+    // *parent is the last node we could walk to, create new children
+    while (s) {
+        parent = ns_addChild(parent, s);
+        s = strtok(NULL, "/");
+    }
+    free(p2);
+    return parent;
+}
+
+// return the node's namespace path
 char*
 ns_node2path(char *buf, int len, struct nsnode *n)
 {
@@ -283,40 +334,42 @@ ns_node2path(char *buf, int len, struct nsnode *n)
 }
 
 // ----------------------------------------------------------------------
+// circular buffer for return values, index by command line number
 
-#define RINGSIZE 5
+#define RINGSIZE 50
 char* ringbuf[RINGSIZE];
 int ringndx, ringoffs;
 
+// add an entry to the ring buffer, eliminate oldest overflow item
 void
-ring_addName(int linecnt, char *name)
+ring_addValue(int linecnt, char *val)
 {
-    if (ringbuf)
+    if (ringbuf[ringndx])
         free(ringbuf[ringndx]);
-    if (name)
-        ringbuf[ringndx] = strdup(name);
+    if (val)
+        ringbuf[ringndx] = strdup(val);
     else
         ringbuf[ringndx] = NULL;
     ringoffs = linecnt;
     ringndx = (ringndx + 1) % RINGSIZE;
 }
 
+// retrieve value by line number
 char*
-ring_getName(int linecnt)
+ring_getValueByLN(int linecnt)
 {
     if (linecnt > ringoffs || linecnt <= (ringoffs - RINGSIZE))
         return NULL;
     return ringbuf[(ringndx - 1 + RINGSIZE - ringoffs + linecnt) % RINGSIZE];
 }
 
-
+// takes a malloced str, expands any $xx inside it, returns new buffer
 char*
 ring_expand(char *str)
 {
-    // takes a malloced str, expands any $xx inside it, returns new buffer
     int len, pos, pos$, ndx;
 
-    for (len = strlen(str)+1, pos = 0, ndx = -1; str[pos]; pos++) {
+    for (len = strlen(str)+1, pos = 0, ndx = -1;; pos++) {
         if (str[pos] == '$') {
             pos$ = pos;
             ndx = 0;
@@ -324,7 +377,7 @@ ring_expand(char *str)
             if (isdigit(str[pos]))
                 ndx = 10 * ndx + str[pos] - '0';
             else {
-                char *cp = ring_getName(ndx);
+                char *cp = ring_getValueByLN(ndx);
                 if (cp) {
                     int len2 = strlen(cp), len3;
                     len3 = len + len2 - (pos - pos$);
@@ -337,6 +390,8 @@ ring_expand(char *str)
                 ndx = -1;
             }
         }
+        if (!str[pos])
+            break;
     }
     
     return str;
@@ -344,6 +399,7 @@ ring_expand(char *str)
 
 // ----------------------------------------------------------------------
 
+// demo namespace
 struct nsnode*
 init(void)
 {
@@ -368,6 +424,9 @@ init(void)
 
     return n;
 }
+
+// ----------------------------------------------------------------------
+// CLI
 
 void
 help(FILE *f)
@@ -395,16 +454,32 @@ help(FILE *f)
         );
 }
 
-void
+char*
 cmd_mk(char *line)
 {
+    char *kind = strtok(NULL, " \t\n"), *cp;
+
+    if (!strcmp(kind, "node")) {
+        char *name = strtok(NULL, " \t\n");
+        struct nsnode *n = ns_mkNode(name);
+        if (n) {
+            cp = ns_node2path(namebuf, sizeof(namebuf), n);
+            RETURN_RESULT(RPC_OK, cp);
+            return cp;
+        }
+        RETURN_RESULT(RPC_FAIL, "?");
+        return NULL;
+    }
+    
+    
     RETURN_RESULT(RPC_FAIL, "mk not implemented");
+    return NULL;
 }
 
 char*
 cmd_get(char *line)
 {
-    char buf[512], *name = strtok(NULL, " \t\n");
+    char *name = strtok(NULL, " \t\n");
     struct nsnode *n = ns_find(name);
 
     if (!n) {
@@ -412,12 +487,11 @@ cmd_get(char *line)
     } else if (!n->val) {
         RETURN_RESULT(RPC_FAIL, "no value for this name");
     } else {
-        if (sexpr_toStr(buf, n->val)) {
-            RETURN_RESULT(RPC_OK, buf);
-        } else {
-            RETURN_RESULT(RPC_OK, NULL);
+        if (sexpr_toStr(namebuf, sizeof(namebuf), n->val)) {
+            RETURN_RESULT(RPC_OK, namebuf);
+            return namebuf;
         }
-        return ns_node2path(namebuf, sizeof(namebuf), n);
+        RETURN_RESULT(RPC_OK, NULL);
     }
     return NULL;
 }
@@ -471,7 +545,7 @@ cmd_list(int lev, struct nsnode *n)
             printf("/\n");
             cmd_list(lev+1, n->children);
         } else if (n->val) {
-            sexpr_toStr(buf, n->val);
+            sexpr_toStr(buf, sizeof(buf), n->val);
             printf("=%s\n", buf);
         } else
             printf("\n");
@@ -502,7 +576,7 @@ main(int argc, char **argv)
     nsroot = init();
 
     for (;;) {
-        char *verb, *line, prompt[20], *name;
+        char *verb, *line, prompt[20], *val;
         sprintf(prompt, "llc %d> ", linecnt);
         line = readline(prompt);
 
@@ -515,13 +589,13 @@ main(int argc, char **argv)
         add_history(line);
 
         verb = strtok(line, " \t\n");
-        name = NULL;
+        val = NULL;
         if (!strcmp(verb, "mk"))
-            cmd_mk(line);
+            val = cmd_mk(line);
         else if (!strcmp(verb, "get"))
-            name = cmd_get(line);
+            val = cmd_get(line);
         else if (!strcmp(verb, "set"))
-            name = cmd_set(line);
+            val = cmd_set(line);
         else if (!strcmp(verb, "rm"))
             cmd_rm(line);
         else if (!strcmp(verb, "rpc"))
@@ -542,12 +616,12 @@ main(int argc, char **argv)
         }
         free(line);
 
-        ring_addName(linecnt, name);
+        ring_addValue(linecnt, val);
 
         {
             int i;
             for (i = -10; i <= 0; i++) {
-                char *s = ring_getName(linecnt + i);
+                char *s = ring_getValueByLN(linecnt + i);
                 printf(" $%d is %s\n", linecnt + i, s);
             }
         }
