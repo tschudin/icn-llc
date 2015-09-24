@@ -14,8 +14,11 @@
 #include <wolfssl/ssl.h>
 #include <wolfssl/options.h>
 
-#define MAXLINE   4096
-#define SERV_PORT 9596
+#define MSGLEN 1024
+#define SERV_PORT 9001
+
+static int llcPeer_Connect(int listenFD);
+static int llcPeer_CreateListener(WOLFSSL_CTX *context);
 
 enum {
     SELECT_FAIL,
@@ -62,34 +65,18 @@ llcPeer_Select(int peerFD, int relayFD, int cliFD, int nfds,
 }
 
 static void
-llcPeer_Run(WOLFSSL* ssl, int peerFD, int relayFD, int cliFD)
+llcPeer_Run(WOLFSSL_CTX *ctx, int peerFD, int relayFD, int cliFD)
 {
-    // int ret = wolfSSL_connect(ssl);
-    // int error = wolfSSL_get_error(ssl, 0);
-
-    int error = SSL_ERROR_WANT_READ;
     int select_ret;
-
-    int ret = SSL_SUCCESS;
-
     fd_set recvfds, errfds;
+    int nfds = max(peerFD, relayFD, cliFD) + 1;
 
+    // The CLI and relay sockets are uninitialized to start, and
+    // there can be only one of each.
     int cliSocket = 0;
     int relaySocket = 0;
 
-    int nfds = max(peerFD, relayFD, cliFD) + 1;
-    int startfds = nfds;
-
-    int count = 0;
-    while (ret == SSL_SUCCESS) { // && (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE)) {
-        count++;
-
-        if (error == SSL_ERROR_WANT_READ) {
-            // printf("... client would read block\n");
-        } else {
-            // printf("... client would write block\n");
-        }
-
+    for (;;) {
         FD_ZERO(&recvfds);
         FD_SET(peerFD, &recvfds);
         FD_SET(relayFD, &recvfds);
@@ -106,13 +93,41 @@ llcPeer_Run(WOLFSSL* ssl, int peerFD, int relayFD, int cliFD)
         FD_SET(relayFD, &errfds);
         FD_SET(cliFD, &errfds);
 
-        // currTimeout = wolfSSL_dtls_get_current_timeout(ssl);
-        select_ret = select(nfds, &recvfds, NULL, NULL, NULL); // don't care about errors for now
+        select_ret = select(nfds, &recvfds, NULL, &errfds, NULL); // we don't care about errors for now
 
         if (select_ret >= 0) {
-            if (FD_ISSET(peerFD, &recvfds)) {
-                ret = wolfSSL_connect(ssl);
-                error = wolfSSL_get_error(ssl, 0);
+            if (FD_ISSET(peerFD, &recvfds)) { // activity on the listening socket, there's a new connection attempt, so go ahead with it.
+                int newPeerFD = llcPeer_Connect(peerFD);
+                WOLFSSL *ssl = wolfSSL_new(ctx);
+                if (ssl == NULL) {
+                    printf("wolfSSL_new error.\n");
+                } else {
+                    wolfSSL_set_fd(ssl, newPeerFD);
+                    wolfSSL_set_using_nonblock(ssl, 1);
+
+                    fd_set listenfds;
+                    FD_ZERO(&listenfds);
+                    FD_SET(newPeerFD, &listenfds);
+                    struct timeval timeout = { 1, 0 };
+                    int ret = -1;
+                    int error = -1;
+
+                    for (int i = 0; i < 5; i++) {
+                        int result = select(newPeerFD + 1, &listenfds, NULL, NULL, &timeout);
+                        if (result > 0 && FD_ISSET(newPeerFD, &listenfds)) {
+                            ret = wolfSSL_accept(ssl);
+                            error = wolfSSL_get_error(ssl, 0);
+                            break;
+                        }
+                    }
+
+                    if (ret == -1 && error == -1) {
+                        // timeout
+                    } else {
+                        printf("Connected!\n");
+                        // connected.... use wolfSSL_read and wolfSSL_write for IO
+                    }
+                }
             } else if (FD_ISSET(cliFD, &recvfds)) {
                 if ((cliSocket = accept(cliFD, NULL, NULL)) == -1) {
                     perror("Error accepting the CLI connection");
@@ -158,6 +173,124 @@ llcPeer_Run(WOLFSSL* ssl, int peerFD, int relayFD, int cliFD)
     }
 }
 
+void
+llcPeer_SetSocketNonBlocking(int *sockfd)
+{
+    int flags = fcntl(*sockfd, F_GETFL, 0);
+    if (flags < 0) {
+        printf("fcntl get failed");
+    }
+    flags = fcntl(*sockfd, F_SETFL, flags | O_NONBLOCK);
+    if (flags < 0) {
+        printf("fcntl set failed.\n");
+    }
+}
+
+int
+llcPeer_CreateListener(WOLFSSL_CTX *context)
+{
+    int listenFD = socket(AF_INET, SOCK_DGRAM, 0);
+    if (listenFD < 0 ) {
+        printf("Cannot create socket.\n");
+        return 1;
+    }
+
+    printf("Socket allocated\n");
+
+    llcPeer_SetSocketNonBlocking(&listenFD);
+
+    struct sockaddr_in servAddr;
+    memset((char *)&servAddr, 0, sizeof(servAddr));
+    servAddr.sin_family = AF_INET;
+    servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servAddr.sin_port = htons(SERV_PORT);
+
+    int on = 1;
+    int len = sizeof(on);
+    int res = setsockopt(listenFD, SOL_SOCKET, SO_REUSEADDR, &on, len);
+    if (res < 0) {
+        printf("Setsockopt SO_REUSEADDR failed.\n");
+        return 1;
+    }
+
+    if (bind(listenFD, (struct sockaddr *) &servAddr, sizeof(servAddr)) < 0) {
+        printf("Bind failed.\n");
+        return 1;
+    }
+
+    return listenFD;
+}
+
+static int
+llcPeer_Connect(int listenFD)
+{
+    int bytesRecvd;
+    unsigned char  b[MSGLEN];
+    struct sockaddr_in cliAddr;
+    socklen_t clilen = sizeof(cliAddr);
+
+    do {
+        bytesRecvd = (int)recvfrom(listenFD, (char*)b, sizeof(b), MSG_PEEK, (struct sockaddr*)&cliAddr, &clilen);
+    } while (bytesRecvd <= 0);
+
+    if (bytesRecvd > 0) {
+        if (connect(listenFD, (const struct sockaddr*) &cliAddr, sizeof(cliAddr)) != 0) {
+            printf("udp connect failed.\n");
+        }
+    } else {
+        printf("recvfrom failed.\n");
+    }
+
+    printf("Connected!\n");
+    memset(&b, 0, sizeof(b));
+
+    return listenFD;
+
+
+    // WOLFSSL_CTX *clientContext = wolfSSL_CTX_new(wolfDTLSv1_2_client_method());
+    // if (clientContext == NULL) {
+	//     fprintf(stderr, "wolfSSL_CTX_new error.\n");
+	//     return EXIT_FAILURE;
+    // }
+    //
+    // char *certs = "certs/ca-cert.pem";
+    // int result = wolfSSL_CTX_load_verify_locations(clientContext, certs, 0);
+    // if (result != SSL_SUCCESS) {
+	//     fprintf(stderr, "Error loading %s, please check the file.\n", certs);
+	//     return(EXIT_FAILURE);
+    // }
+    //
+    // WOLFSSL *ssl = wolfSSL_new(clientContext);
+    // if (ssl == NULL) {
+	//     printf("unable to get ssl object");
+    //     return 1;
+    // }
+    //
+    // struct sockaddr_in peerAddress;
+    // memset(&peerAddress, 0, sizeof(peerAddress));
+    // peerAddress.sin_family = AF_INET;
+    // peerAddress.sin_port = htons(port);
+    // if (inet_pton(AF_INET, host, &peerAddress.sin_addr) < 1) {
+    //     printf("Error and/or invalid IP address");
+    //     return 1;
+    // }
+    //
+    // wolfSSL_dtls_set_peer(ssl, &peerAddress, sizeof(peerAddress));
+    //
+    // int peerFD = socket(AF_INET, SOCK_DGRAM, 0);
+    // if (peerFD < 0) {
+    // 	printf("Failed to create a socket.");
+    //     return 1;
+    // }
+    //
+    // wolfSSL_set_fd(ssl, peerFD);
+    // wolfSSL_set_using_nonblock(ssl, 1);
+    // fcntl(peerFD, F_SETFL, O_NONBLOCK);
+    //
+    // int ret = wolfSSL_connect(ssl);
+    // int error = wolfSSL_get_error(ssl, 0);
+}
+
 int
 main(int argc, char** argv)
 {
@@ -166,50 +299,33 @@ main(int argc, char** argv)
         return 1;
     }
 
+    char caCertLoc[] = "certs/ca-cert.pem";
+    char servCertLoc[] = "certs/server-cert.pem";
+    char servKeyLoc[] = "certs/server-key.pem";
+
     const char *host = argv[1];
 
-    // wolfSSL_Debugging_ON();
-    // wolfSSL_Init();
-    //
-    // WOLFSSL_CTX *ctx = wolfSSL_CTX_new(wolfDTLSv1_2_client_method());
-    // if (ctx == NULL) {
-	//     fprintf(stderr, "wolfSSL_CTX_new error.\n");
-	//     return EXIT_FAILURE;
-    // }
-    //
-    // char *certs = "peer1.pem";
-    // int result = wolfSSL_CTX_load_verify_locations(ctx, certs, 0);
-    // if (result != SSL_SUCCESS) {
-	//     fprintf(stderr, "Error loading %s, please check the file.\n", certs);
-	//     return(EXIT_FAILURE);
-    // }
-    //
-    // WOLFSSL *ssl = wolfSSL_new(ctx);
-    // if (ssl == NULL) {
-	//     printf("unable to get ssl object");
-    //     return 1;
-    // }
+    wolfSSL_Debugging_ON();
+    wolfSSL_Init();
 
-    struct sockaddr_in peerAddress;
-    memset(&peerAddress, 0, sizeof(peerAddress));
-    peerAddress.sin_family = AF_INET;
-    peerAddress.sin_port = htons(SERV_PORT);
-    if (inet_pton(AF_INET, host, &peerAddress.sin_addr) < 1) {
-        printf("Error and/or invalid IP address");
+    WOLFSSL_CTX *peerListenerCtx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
+    if (peerListenerCtx == NULL) {
+        printf("wolfSSL_CTX_new error.\n");
         return 1;
     }
 
-    // wolfSSL_dtls_set_peer(ssl, &peerAddress, sizeof(peerAddress));
-
-    int peerFD = socket(AF_INET, SOCK_DGRAM, 0);
-    if (peerFD < 0) {
-    	printf("Failed to create a socket.");
+    if (wolfSSL_CTX_load_verify_locations(peerListenerCtx, caCertLoc, 0) != SSL_SUCCESS) {
+        printf("Error loading %s, please check the file.\n", caCertLoc);
         return 1;
     }
-
-    // wolfSSL_set_fd(ssl, peerFD);
-    // wolfSSL_set_using_nonblock(ssl, 1);
-    // fcntl(peerFD, F_SETFL, O_NONBLOCK);
+    if (wolfSSL_CTX_use_certificate_file(peerListenerCtx, servCertLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
+        printf("Error loading %s, please check the file.\n", servCertLoc);
+        return 1;
+    }
+    if (wolfSSL_CTX_use_PrivateKey_file(peerListenerCtx, servKeyLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
+        printf("Error loading %s, please check the file.\n", servKeyLoc);
+        return 1;
+    }
 
     struct sockaddr_un cliAddressInfo;
     memset(&cliAddressInfo, 0, sizeof(cliAddressInfo));
@@ -257,7 +373,8 @@ main(int argc, char** argv)
 
     fcntl(relayFD, F_SETFL, O_NONBLOCK);
 
-    llcPeer_Run(NULL, peerFD, relayFD, cliFD);
+    int peerFD = llcPeer_CreateListener(peerListenerCtx);
+    llcPeer_Run(peerListenerCtx, peerFD, relayFD, cliFD);
 
     // WOLFSSL_SESSION *session = wolfSSL_get_session(ssl);
     // sslResume = wolfSSL_new(ctx);
