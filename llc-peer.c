@@ -62,7 +62,7 @@ llcPeer_Select(int peerFD, int relayFD, int cliFD, int nfds,
 }
 
 static void
-llcPeer_Connect(WOLFSSL* ssl, int peerFD, int relayFD, int cliFD)
+llcPeer_Run(WOLFSSL* ssl, int peerFD, int relayFD, int cliFD)
 {
     // int ret = wolfSSL_connect(ssl);
     // int error = wolfSSL_get_error(ssl, 0);
@@ -107,164 +107,53 @@ llcPeer_Connect(WOLFSSL* ssl, int peerFD, int relayFD, int cliFD)
         FD_SET(cliFD, &errfds);
 
         // currTimeout = wolfSSL_dtls_get_current_timeout(ssl);
-        // select_ret = llcPeer_Select(peerFD, relayFD, cliFD, nfds, recvfds, errfds, timeout);
-        printf("block on select\n");
         select_ret = select(nfds, &recvfds, NULL, NULL, NULL); // don't care about errors for now
-        // printf("select returned\n");
 
         if (select_ret >= 0) {
             if (FD_ISSET(peerFD, &recvfds)) {
-                printf("peer ready\n");
                 ret = wolfSSL_connect(ssl);
                 error = wolfSSL_get_error(ssl, 0);
             } else if (FD_ISSET(cliFD, &recvfds)) {
-                printf("select returned CLI\n");
                 if ((cliSocket = accept(cliFD, NULL, NULL)) == -1) {
                     perror("Error accepting the CLI connection");
                 }
-                printf("accepted\n");
                 fcntl(cliSocket, F_SETFL, O_NONBLOCK);
-                // FD_SET(cliFD, &recvfds);
                 FD_SET(cliSocket, &recvfds);
                 if (cliSocket >= nfds) {
                     nfds = cliSocket + 1;
                 }
             } else if (FD_ISSET(relayFD, &recvfds)) {
-                printf("relay accepted\n");
                 if ((relaySocket = accept(relayFD, NULL, NULL)) == -1) {
                     perror("Error accepting the CLI connection");
                 }
-                printf("accepted\n");
                 fcntl(relaySocket, F_SETFL, O_NONBLOCK);
-                // FD_SET(relayFD, &recvfds);
                 FD_SET(relaySocket, &recvfds);
                 if (relaySocket >= nfds) {
                     nfds = relaySocket + 1;
                 }
             } else if (FD_ISSET(cliSocket, &recvfds)) {
-                printf("reading data from socket...");
                 int rc = 0;
                 char buf[100];
                 while ((rc = read(cliSocket, buf, sizeof(buf))) > 0) {
+                    // TODO: do meaningful stuff with the data here
                     printf("read %u bytes: %.*s\n", rc, rc, buf);
                 }
-                printf("done.\n");
                 close(cliSocket);
                 FD_CLR(cliSocket, &recvfds);
-                printf("really done.\n");
                 cliSocket = 0;
             } else if (FD_ISSET(relaySocket, &recvfds)) {
-                printf("reading data from relay socket...");
                 int rc = 0;
                 char buf[100];
                 while ((rc = read(relaySocket, buf, sizeof(buf))) > 0) {
+                    // TODO: do meaningful stuff with the data here
                     printf("read %u bytes: %.*s\n", rc, rc, buf);
                 }
                 close(relaySocket);
                 FD_CLR(relaySocket, &recvfds);
                 relaySocket = 0;
             }
-        } else { // socket_ret < 0
-            // timeout!
-            printf("timeout...\n");
-        }
-
-        // else if (select_ret == SELECT_TIMEOUT && !wolfSSL_dtls(ssl)) {
-            // error = 2;
-        // }
-        // } else if (select_ret == SELECT_TIMEOUT && wolfSSL_dtls(ssl) &&
-    	//     wolfSSL_dtls_got_timeout(ssl) >= 0) {
-        //     error = 2;
-        // } else{
-        //     error = SSL_FATAL_ERROR;
-        // }
-    }
-
-    if (ret != SSL_SUCCESS) {
-        printf("SSL_connect failed with error %d\n", ret);
-    }
-}
-
-void
-llcPeer_PeerRun(WOLFSSL* ssl)
-{
-    int n = 0;
-    char sendLine[MAXLINE];
-    char recvLine[MAXLINE - 1];
-
-    for (;;) {
-        while ((n = wolfSSL_read(ssl, recvLine, sizeof(recvLine)-1)) <= 0) {
-	        int readErr = wolfSSL_get_error(ssl, 0);
-	        if (readErr != SSL_ERROR_WANT_READ) {
-                printf("wolfSSL_read failed");
-            }
-        }
-
-        // while  ((wolfSSL_write(ssl, sendLine, strlen(sendLine))) != strlen(sendLine)) {
-    	//     printf("SSL_write failed");
-        // }
-    }
-}
-
-void
-llcPeer_RelayRun(int relayFD)
-{
-    if (listen(relayFD, 5) == -1) {
-        perror("relay listen error");
-        exit(-1);
-    }
-
-    int cl = 0;
-    int rc = 0;
-    char buf[100];
-
-    while (1) {
-        if ((cl = accept(relayFD, NULL, NULL)) == -1) {
-            // perror("relay FD accept error ");
-            continue;
-        }
-
-        while ((rc = read(cl, buf, sizeof(buf))) > 0) {
-            printf("read %u bytes: %.*s\n", rc, rc, buf);
-        }
-
-        if (rc == -1) {
-            perror("read");
-            exit(-1);
-        } else if (rc == 0) {
-            printf("EOF\n");
-            close(cl);
-        }
-    }
-}
-
-void llcPeer_CLIRun(int cliFD)
-{
-    if (listen(cliFD, 5) == -1) {
-        perror("CLI listen error");
-        exit(-1);
-    }
-
-    int cl = 0;
-    int rc = 0;
-    char buf[100];
-
-    while (1) {
-        if ((cl = accept(cliFD, NULL, NULL)) == -1) {
-            // perror("CLI accept error");
-            continue;
-        }
-
-        while ((rc = read(cl, buf, sizeof(buf))) > 0) {
-            printf("read %u bytes: %.*s\n", rc, rc, buf);
-        }
-
-        if (rc == -1) {
-            perror("read");
-            exit(-1);
-        } else if (rc == 0) {
-            printf("EOF\n");
-            close(cl);
+        } else {
+            // pass: timeout
         }
     }
 }
@@ -349,7 +238,6 @@ main(int argc, char** argv)
     memset(&relayAddressInfo, 0, sizeof(relayAddressInfo));
     relayAddressInfo.sun_family = AF_UNIX;
     strcpy(relayAddressInfo.sun_path, argv[2]);
-    printf("relay socket %s\n", argv[2]);
 
     int relayFD = socket(AF_UNIX, SOCK_STREAM, 0);
     if (relayFD < 0) {
@@ -369,10 +257,7 @@ main(int argc, char** argv)
 
     fcntl(relayFD, F_SETFL, O_NONBLOCK);
 
-    llcPeer_Connect(NULL, peerFD, relayFD, cliFD);
-    // llcPeer_PeerRun(NULL);
-    // llcPeer_(relayFD);
-    // llcPeer_CLIRun(cliFD);
+    llcPeer_Run(NULL, peerFD, relayFD, cliFD);
 
     // WOLFSSL_SESSION *session = wolfSSL_get_session(ssl);
     // sslResume = wolfSSL_new(ctx);
