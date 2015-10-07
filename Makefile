@@ -4,11 +4,11 @@ BINARIES= llc-peer llc-test-client llc-test-client2 llc-dtls-test llc-dtls-clien
 
 all: ${BINARIES}
 
-llc-cli: Makefile llc-cli.c
-	${CC} -o $@ -lreadline $@.c
+# llc-cli: Makefile llc-cli.c
+#	${CC} -o $@ -lreadline $@.c
 
-llc-peer: Makefile llc-peer.c
-	gcc -o $@ $@.c -lwolfssl
+llc-peer: Makefile llc-peer.c llc-cmd.c
+	gcc -o $@ $@.c -g -lreadline -lwolfssl
 
 llc-dtls-test: Makefile llc-dtls-test.c
 	gcc -o $@ $@.c -lwolfssl

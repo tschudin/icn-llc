@@ -446,11 +446,12 @@ help(FILE *f)
             "  set NAME VALUE\n"
             "  rm NAME\n"
             "  rpc LINK COMMAND\n\n"
-            "  help\n"
-            "  list\n"
             "  dump\n"
             "  peek OFFS LEN\n"
-            "  quit\n"
+            "  help    produces this output\n"
+            "  list    produces variable tree\n"
+            "  quit    quits\n"
+            "  var     lists the stored return values\n"
         );
 }
 
@@ -565,10 +566,11 @@ cmd_peek(char *line)
     RETURN_RESULT(RPC_FAIL, "peek not implemented");
 }
 
+static int linecnt;
+
 int
 llc_execute(char *line)
 {
-    static int linecnt;
     char *verb, *val;
     
     if (!line)
@@ -600,24 +602,23 @@ llc_execute(char *line)
         cmd_dump(line);
     else if (!strcmp(verb, "peek"))
         cmd_peek(line);
-    else if (!strcmp(verb, "quit"))
+    else if (!strcmp(verb, "var")) {
+        int i;
+        for (i = -10; i < 0; i++) {
+            char *s = ring_getValueByLN(linecnt + i);
+            printf(" $%d is %s\n", linecnt + i, s);
+        }
+    } else if (!strcmp(verb, "quit"))
         return -1;
     else {
         fprintf(stderr, "unknown verb \"%s\", "
                 "see full list with \"help\"\n", verb);
     }
-    free(line);
 
-    ring_addValue(linecnt, val);
-
-    {
-        int i;
-        for (i = -10; i <= 0; i++) {
-            char *s = ring_getValueByLN(linecnt + i);
-            printf(" $%d is %s\n", linecnt + i, s);
-        }
+    if (val) {
+        ring_addValue(linecnt, val);
+        linecnt++;
     }
-    linecnt++;
     return 0;
 }
 

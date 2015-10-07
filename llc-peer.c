@@ -1,3 +1,5 @@
+// llc-peer.c
+
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -21,6 +23,8 @@
 
 static int llcPeer_Connect(int listenFD);
 static int llcPeer_CreateListener(WOLFSSL_CTX *context);
+
+char *icnllc_path = "/tmp/icn-llc.fifo";
 
 enum {
     SELECT_FAIL,
@@ -83,13 +87,16 @@ llcPeer_Run(WOLFSSL_CTX *ctx, int peerFD, int relayFD, int cliFD)
         FD_SET(peerFD, &recvfds);
         FD_SET(relayFD, &recvfds);
         FD_SET(cliFD, &recvfds);
+        //        FD_SET(cliFD, &recvfds);
+        /*
         if (cliSocket > 0) {
             FD_SET(cliSocket, &recvfds);
         }
         if (relaySocket > 0) {
             FD_SET(relaySocket, &recvfds);
         }
-
+        */
+        
         FD_ZERO(&errfds);
         FD_SET(peerFD, &errfds);
         FD_SET(relayFD, &errfds);
@@ -131,43 +138,16 @@ llcPeer_Run(WOLFSSL_CTX *ctx, int peerFD, int relayFD, int cliFD)
                     }
                 }
             } else if (FD_ISSET(cliFD, &recvfds)) {
-                if ((cliSocket = accept(cliFD, NULL, NULL)) == -1) {
-                    perror("Error accepting the CLI connection");
-                }
-                fcntl(cliSocket, F_SETFL, O_NONBLOCK);
-                FD_SET(cliSocket, &recvfds);
-                if (cliSocket >= nfds) {
-                    nfds = cliSocket + 1;
-                }
+                rl_callback_read_char();
             } else if (FD_ISSET(relayFD, &recvfds)) {
                 if ((relaySocket = accept(relayFD, NULL, NULL)) == -1) {
-                    perror("Error accepting the CLI connection");
+                    perror("Error accepting the RELAY connection");
                 }
                 fcntl(relaySocket, F_SETFL, O_NONBLOCK);
                 FD_SET(relaySocket, &recvfds);
                 if (relaySocket >= nfds) {
                     nfds = relaySocket + 1;
                 }
-            } else if (FD_ISSET(cliSocket, &recvfds)) {
-                int rc = 0;
-                char buf[100];
-                while ((rc = read(cliSocket, buf, sizeof(buf))) > 0) {
-                    // TODO: do meaningful stuff with the data here
-                    printf("read %u bytes: %.*s\n", rc, rc, buf);
-                }
-                close(cliSocket);
-                FD_CLR(cliSocket, &recvfds);
-                cliSocket = 0;
-            } else if (FD_ISSET(relaySocket, &recvfds)) {
-                int rc = 0;
-                char buf[100];
-                while ((rc = read(relaySocket, buf, sizeof(buf))) > 0) {
-                    // TODO: do meaningful stuff with the data here
-                    printf("read %u bytes: %.*s\n", rc, rc, buf);
-                }
-                close(relaySocket);
-                FD_CLR(relaySocket, &recvfds);
-                relaySocket = 0;
             }
         } else {
             // pass: timeout
@@ -303,6 +283,7 @@ dtls_setup(char *host, WOLFSSL_CTX **ctx)
     wolfSSL_Debugging_ON();
     wolfSSL_Init();
 
+#ifdef BUGGY
     *ctx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
     if (*ctx == NULL) {
         printf("wolfSSL_CTX_new error.\n");
@@ -321,6 +302,7 @@ dtls_setup(char *host, WOLFSSL_CTX **ctx)
         printf("Error loading %s, please check the file.\n", servKeyLoc);
         return -1;
     }
+#endif
 
    return llcPeer_CreateListener(*ctx);
 }
@@ -329,8 +311,9 @@ int
 relay_setup(char *fifoname)
 {
     int relayFD;
-    
     struct sockaddr_un relayAddressInfo;
+
+    unlink(fifoname);
     memset(&relayAddressInfo, 0, sizeof(relayAddressInfo));
     relayAddressInfo.sun_family = AF_UNIX;
     strcpy(relayAddressInfo.sun_path, fifoname);
@@ -356,10 +339,36 @@ relay_setup(char *fifoname)
     return relayFD;
 }
 
+void readline_start(int linecnt);
+
+void
+cmd_doit(char *line)
+{
+    if (!llc_execute(line))
+        readline_start(linecnt);
+    else {
+        printf("\n* llc-cmd ends here.\n");
+        exit(0);
+    }
+}
+    
+void
+readline_start(int linecnt)
+{
+    char prompt[20], *line;
+
+    sprintf(prompt, "llc %d> ", linecnt);
+    rl_callback_handler_install(prompt, cmd_doit);
+}
+
 int
 console_setup()
 {
+    printf("ICN-LLC command console\n\n");
+    readline_start(0);
+
     /*
+#ifdef XXX
     struct sockaddr_un cliAddressInfo;
     memset(&cliAddressInfo, 0, sizeof(cliAddressInfo));
     cliAddressInfo.sun_family = AF_UNIX;
@@ -397,6 +406,9 @@ main(int argc, char** argv)
         return 1;
     }
 
+    using_history();
+    nsroot = init();
+
     peerFD = dtls_setup(argv[1], &peerListenerCtx);
     if (peerFD < 0)
         return peerFD;
@@ -406,16 +418,19 @@ main(int argc, char** argv)
         return relayFD;
 
     cliFD = console_setup();
-    
+
     llcPeer_Run(peerListenerCtx, peerFD, relayFD, cliFD);
+
+    // should be called before exit:
 
     // WOLFSSL_SESSION *session = wolfSSL_get_session(ssl);
     // sslResume = wolfSSL_new(ctx);
 
     // wolfSSL_shutdown(ssl);
     // wolfSSL_free(ssl);
+
     close(peerFD);
-    close(cliFD);
+    //    close(cliFD);
     close(relayFD);
 
     return 0;
