@@ -1,6 +1,6 @@
 /* 
- * @f llc-cli.c
- * @b ICN-LLC - command line interface
+ * @f llc-cmd.c
+ * @b ICN-LLC - command execution (ASCII console for the time being)
  *
  * Copyright (C) 2015, Christian Tschudin, University of Basel
  *
@@ -566,6 +566,63 @@ cmd_peek(char *line)
 }
 
 int
+llc_execute(char *line)
+{
+    static int linecnt;
+    char *verb, *val;
+    
+    if (!line)
+        return 0;
+    
+    for (verb = line; isspace(*verb); verb++);
+    if (!*verb || *verb == '#') // empty line or comment
+        return 0;
+
+    add_history(line);
+
+    verb = strtok(line, " \t\n");
+    val = NULL;
+    if (!strcmp(verb, "mk"))
+        val = cmd_mk(line);
+    else if (!strcmp(verb, "get"))
+        val = cmd_get(line);
+    else if (!strcmp(verb, "set"))
+        val = cmd_set(line);
+    else if (!strcmp(verb, "rm"))
+        cmd_rm(line);
+    else if (!strcmp(verb, "rpc"))
+        cmd_rpc(line);
+    else if (!strcmp(verb, "help"))
+        help(NULL);
+    else if (!strcmp(verb, "list"))
+        cmd_list(0, nsroot);
+    else if (!strcmp(verb, "dump"))
+        cmd_dump(line);
+    else if (!strcmp(verb, "peek"))
+        cmd_peek(line);
+    else if (!strcmp(verb, "quit"))
+        return -1;
+    else {
+        fprintf(stderr, "unknown verb \"%s\", "
+                "see full list with \"help\"\n", verb);
+    }
+    free(line);
+
+    ring_addValue(linecnt, val);
+
+    {
+        int i;
+        for (i = -10; i <= 0; i++) {
+            char *s = ring_getValueByLN(linecnt + i);
+            printf(" $%d is %s\n", linecnt + i, s);
+        }
+    }
+    linecnt++;
+    return 0;
+}
+
+#ifdef XXX
+int
 main(int argc, char **argv)
 {
     int linecnt = 0;
@@ -582,54 +639,11 @@ main(int argc, char **argv)
 
         if (!line)
             break;
-        for (verb = line; isspace(*verb); verb++);
-        if (!*verb || *verb == '#') // empty line or comment
-            continue;
-
-        add_history(line);
-
-        verb = strtok(line, " \t\n");
-        val = NULL;
-        if (!strcmp(verb, "mk"))
-            val = cmd_mk(line);
-        else if (!strcmp(verb, "get"))
-            val = cmd_get(line);
-        else if (!strcmp(verb, "set"))
-            val = cmd_set(line);
-        else if (!strcmp(verb, "rm"))
-            cmd_rm(line);
-        else if (!strcmp(verb, "rpc"))
-            cmd_rpc(line);
-        else if (!strcmp(verb, "help"))
-            help(NULL);
-        else if (!strcmp(verb, "list"))
-            cmd_list(0, nsroot);
-        else if (!strcmp(verb, "dump"))
-            cmd_dump(line);
-        else if (!strcmp(verb, "peek"))
-            cmd_peek(line);
-        else if (!strcmp(verb, "quit"))
-            break;
-        else {
-            fprintf(stderr, "unknown verb \"%s\", "
-                    "see full list with \"help\"\n", verb);
-        }
-        free(line);
-
-        ring_addValue(linecnt, val);
-
-        {
-            int i;
-            for (i = -10; i <= 0; i++) {
-                char *s = ring_getValueByLN(linecnt + i);
-                printf(" $%d is %s\n", linecnt + i, s);
-            }
-        }
-        linecnt++;
     }
 
     printf("\n* llc-cli ends here.\n");
     return 0;
 }
+#endif
 
 // eof

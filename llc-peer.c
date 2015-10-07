@@ -17,6 +17,8 @@
 #define MSGLEN 1024
 #define SERV_PORT 9001
 
+#include "llc-cmd.c"
+
 static int llcPeer_Connect(int listenFD);
 static int llcPeer_CreateListener(WOLFSSL_CTX *context);
 
@@ -292,41 +294,72 @@ llcPeer_Connect(int listenFD)
 }
 
 int
-main(int argc, char** argv)
+dtls_setup(char *host, WOLFSSL_CTX **ctx)
 {
-    if (argc != 4) {
-	    printf("usage: %s <IP address> <relay-name> <cli-name>\n", argv[0]);
-        return 1;
-    }
-
     char caCertLoc[] = "certs/ca-cert.pem";
     char servCertLoc[] = "certs/server-cert.pem";
     char servKeyLoc[] = "certs/server-key.pem";
 
-    const char *host = argv[1];
-
     wolfSSL_Debugging_ON();
     wolfSSL_Init();
 
-    WOLFSSL_CTX *peerListenerCtx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
-    if (peerListenerCtx == NULL) {
+    *ctx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
+    if (*ctx == NULL) {
         printf("wolfSSL_CTX_new error.\n");
-        return 1;
+        return -1;
     }
 
-    if (wolfSSL_CTX_load_verify_locations(peerListenerCtx, caCertLoc, 0) != SSL_SUCCESS) {
+    if (wolfSSL_CTX_load_verify_locations(*ctx, caCertLoc, 0) != SSL_SUCCESS) {
         printf("Error loading %s, please check the file.\n", caCertLoc);
-        return 1;
+        return -1;
     }
-    if (wolfSSL_CTX_use_certificate_file(peerListenerCtx, servCertLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
+    if (wolfSSL_CTX_use_certificate_file(*ctx, servCertLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
         printf("Error loading %s, please check the file.\n", servCertLoc);
-        return 1;
+        return -1;
     }
-    if (wolfSSL_CTX_use_PrivateKey_file(peerListenerCtx, servKeyLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
+    if (wolfSSL_CTX_use_PrivateKey_file(*ctx, servKeyLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
         printf("Error loading %s, please check the file.\n", servKeyLoc);
-        return 1;
+        return -1;
     }
 
+   return llcPeer_CreateListener(*ctx);
+}
+
+int
+relay_setup(char *fifoname)
+{
+    int relayFD;
+    
+    struct sockaddr_un relayAddressInfo;
+    memset(&relayAddressInfo, 0, sizeof(relayAddressInfo));
+    relayAddressInfo.sun_family = AF_UNIX;
+    strcpy(relayAddressInfo.sun_path, fifoname);
+
+    relayFD = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (relayFD < 0) {
+        printf("Failed to create a socket.");
+        return -1;
+    }
+
+    if (bind(relayFD, (struct sockaddr *) &relayAddressInfo, sizeof(struct sockaddr_un))) {
+        printf("Failed to bind to CLI socket.");
+        return -1;
+    }
+
+    if (listen(relayFD, 5) == -1) {
+        perror("listen error");
+        exit(-1);
+    }
+
+    fcntl(relayFD, F_SETFL, O_NONBLOCK);
+    
+    return relayFD;
+}
+
+int
+console_setup()
+{
+    /*
     struct sockaddr_un cliAddressInfo;
     memset(&cliAddressInfo, 0, sizeof(cliAddressInfo));
     cliAddressInfo.sun_family = AF_UNIX;
@@ -349,31 +382,31 @@ main(int argc, char** argv)
     }
 
     fcntl(cliFD, F_SETFL, O_NONBLOCK);
+    */
+    return 0;
+}
 
-    struct sockaddr_un relayAddressInfo;
-    memset(&relayAddressInfo, 0, sizeof(relayAddressInfo));
-    relayAddressInfo.sun_family = AF_UNIX;
-    strcpy(relayAddressInfo.sun_path, argv[2]);
+int
+main(int argc, char** argv)
+{
+    int peerFD, relayFD, cliFD;
+    WOLFSSL_CTX *peerListenerCtx = NULL;
 
-    int relayFD = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (relayFD < 0) {
-        printf("Failed to create a socket.");
+    if (argc != 4) {
+	    printf("usage: %s <IP address> <relay-name> <cli-name>\n", argv[0]);
         return 1;
     }
 
-    if (bind(relayFD, (struct sockaddr *) &relayAddressInfo, sizeof(struct sockaddr_un))) {
-        printf("Failed to bind to CLI socket.");
-        return 1;
-    }
+    peerFD = dtls_setup(argv[1], &peerListenerCtx);
+    if (peerFD < 0)
+        return peerFD;
 
-    if (listen(relayFD, 5) == -1) {
-        perror("listen error");
-        exit(-1);
-    }
+    relayFD = relay_setup(argv[2]);
+    if (relayFD < 0)
+        return relayFD;
 
-    fcntl(relayFD, F_SETFL, O_NONBLOCK);
-
-    int peerFD = llcPeer_CreateListener(peerListenerCtx);
+    cliFD = console_setup();
+    
     llcPeer_Run(peerListenerCtx, peerFD, relayFD, cliFD);
 
     // WOLFSSL_SESSION *session = wolfSSL_get_session(ssl);

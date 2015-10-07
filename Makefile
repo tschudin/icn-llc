@@ -1,6 +1,6 @@
 # Makefile
 
-BINARIES= llc-cli llc-peer llc-test-client llc-test-client2 llc-dtls-test llc-dtls-client-test
+BINARIES= llc-peer llc-test-client llc-test-client2 llc-dtls-test llc-dtls-client-test
 
 all: ${BINARIES}
 
