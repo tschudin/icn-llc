@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -36,12 +37,16 @@ struct sexpr { // atom or list
         struct sexpr *list;
         int intval;
         char *strval;
+        void *data;
     } s;
+    int dataLen;
+    char *note;
 };
 
 #define SEXPR_LST 1
 #define SEXPR_INT 2
 #define SEXPR_STR 3
+#define SEXPR_BIN 4
 
 struct nsnode;
 typedef int (*ns_callback)(struct nsnode*, struct sexpr *old);
@@ -52,6 +57,12 @@ struct nsnode { // namespace node
     char *relname;
     struct sexpr *val;
     ns_callback set_cb;
+/*
+    char *note;
+    void *data;
+    int dataLen;
+*/
+    int topCnt;
 };
 
 struct nsnode *nsroot;
@@ -136,8 +147,13 @@ struct sexpr*
 sexpr_fromStr(char *s)
 {
     char *cp = s;
+    struct sexpr *e = sexpr_parse(&cp);
 
-    return sexpr_parse(&cp);
+    while (*cp && isspace(*cp)) cp++;
+    if (*cp)
+        e->note = strdup(cp);
+
+    return e;
 }
 
 // write a sexpr struct into a string (malloced)
@@ -156,6 +172,9 @@ sexpr_toStr(char *buf, int buflen, struct sexpr *e)
     case SEXPR_STR:
         buf += sprintf(buf, "\"%s\"", e->s.strval);
         break;
+    case SEXPR_BIN:
+        buf += sprintf(buf, "[%d Bytes]", e->dataLen);
+        break;
     case SEXPR_LST:
         buf += sprintf(buf, "(");
         for (e = e->s.list; e; e = e->next) {
@@ -168,6 +187,9 @@ sexpr_toStr(char *buf, int buflen, struct sexpr *e)
     default:
         return 0;
     }
+
+    if (e->note)
+        buf += sprintf(buf, "  %s", e->note);
     return buf - start;
 }
 
@@ -177,8 +199,12 @@ sexpr_free(struct sexpr *e)
 {
     if (!e)
         return;
+    if (e->note)
+        free(e->note);
     if (e->type == SEXPR_STR && e->s.strval)
         free(e->s.strval);
+    else if (e->type == SEXPR_BIN && e->s.data)
+        free(e->s.data);
     else if (e->type == SEXPR_LST) {
         while (e->s.list) {
             struct sexpr *e2 = e->s.list->next;
@@ -212,12 +238,28 @@ ns_addChild(struct nsnode *parent, char *name)
     return child;
 }
 
+// add a new child node to a namespace node
+struct nsnode*
+ns_addUniqueChild(struct nsnode *parent)
+{
+    char buf[10];
+
+    parent->topCnt++;
+    sprintf(buf, "%d", parent->topCnt);
+    return ns_addChild(parent, buf);
+}
+
 // assign a new value to a namespace node, trigger the set callback
 void
 ns_setExpr(struct nsnode *n, struct sexpr *e)
 {
     struct sexpr *old = n->val;
-    
+
+/*
+    free(n->note);
+    n->note = e->note ? strdup(e->note) : NULL;
+*/
+
     n->val = e;
     if (n->set_cb)
         (n->set_cb)(n, old);
@@ -416,7 +458,7 @@ init(void)
 
     n2 = ns_addChild(n, "info");
     n3 = ns_addChild(n2, "version");
-    e = sexpr_fromStr("\"0.01\"");
+    e = sexpr_fromStr("\"0.01\" \"this is a comment\"");
     ns_setExpr(n3, e);
 
     n2 = ns_addChild(n, "key");
@@ -436,9 +478,9 @@ help(FILE *f)
 
     fprintf(f,
            "Available commands:\n"
-            "  mk cert FILE\n"
+            "  mk cert FILE [NOTE]\n"
             "  mk dev PARAMS\n"
-            "  mk key FILE\n"
+            "  mk key FILE [NOTE]\n"
             "  mk link LOCALDEV REMOTEDEV\n"
             "  mk pipe LINK LOCALDEV REMOTESRVC\n"
             "  mk srvc SRVCNAME LOCALDEV\n"
@@ -456,6 +498,44 @@ help(FILE *f)
 }
 
 char*
+cmd_helperLoadFromFile(char *path)
+{
+    char *expr = strtok(NULL, "\n");
+    struct sexpr *e = expr ? sexpr_fromStr(expr) : NULL;
+    struct nsnode *n;
+    struct stat st;
+    int fd;
+    void *bin;
+
+    if (!e || e->type != SEXPR_STR) {
+        RETURN_RESULT(RPC_FAIL, "invalid expression");
+        return NULL;
+    }
+    if (stat(e->s.strval, &st)) {
+        RETURN_RESULT(RPC_FAIL, "file access problem");
+        return NULL;
+    }
+    fd = open(e->s.strval, O_RDONLY);
+    bin = malloc(st.st_size);
+    read(fd, bin, st.st_size);
+    close(fd);
+    free(e->s.strval);
+    e->type = SEXPR_BIN;
+    e->s.data = bin;
+    e->dataLen = st.st_size;
+
+    n = ns_mkNode(path);
+    n = ns_addUniqueChild(n);
+    ns_setExpr(n, e);
+/*
+    n->data = bin;
+    n->dataLen = st.st_size;
+*/
+    RETURN_RESULT(RPC_OK, NULL);
+    return ns_node2path(namebuf, sizeof(namebuf), n);
+}
+
+char*
 cmd_mk(char *line)
 {
     char *kind = strtok(NULL, " \t\n"), *cp;
@@ -470,8 +550,11 @@ cmd_mk(char *line)
         }
         RETURN_RESULT(RPC_FAIL, "?");
         return NULL;
+    } else if (!strcmp(kind, "cert")) {
+        return cmd_helperLoadFromFile("/cert");
+    } else if (!strcmp(kind, "key")) {
+        return cmd_helperLoadFromFile("/key");
     }
-    
     
     RETURN_RESULT(RPC_FAIL, "mk not implemented");
     return NULL;
