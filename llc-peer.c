@@ -1,3 +1,5 @@
+// llc-peer.c
+
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -17,8 +19,12 @@
 #define MSGLEN 1024
 #define SERV_PORT 9001
 
+#include "llc-cmd.c"
+
 static int llcPeer_Connect(int listenFD);
 static int llcPeer_CreateListener(WOLFSSL_CTX *context);
+
+char *icnllc_path = "/tmp/icn-llc.fifo";
 
 enum {
     SELECT_FAIL,
@@ -28,6 +34,15 @@ enum {
     SELECT_CLI_READY,
     SELECT_ERROR_READY
 };
+
+
+struct session_s {
+    int cliFD;
+    int relayFD;
+    int listenerFD;
+    struct WOLFSSL_CTX *listenerCtx;
+    struct WOLFSSL_CTX *senderCtx;
+} theSession;
 
 static int
 max(int *x, int len)
@@ -65,10 +80,11 @@ llcPeer_Select(int listenerFD, int relayFD, int cliFD, int nfds,
 }
 
 static void
-llcPeer_Run(WOLFSSL_CTX *listenerCtx, WOLFSSL_CTX *senderCtx, int listenerFD, int relayFD, int cliFD)
+llcPeer_Run(struct session_s *sp)
 {
     int select_ret;
     fd_set recvfds, errfds;
+    int nfds = max(sp->listenerFD, sp->relayFD, sp->cliFD) + 1;
 
     // There is only one CLI socket.
     int cliSocket = 0;
@@ -77,7 +93,7 @@ llcPeer_Run(WOLFSSL_CTX *listenerCtx, WOLFSSL_CTX *senderCtx, int listenerFD, in
     int *relaySockets = (int *) malloc(sizeof(int) * 1);
     relaySockets[0] = 0;
 
-    // 
+    //
     int *descriptors = (int *) malloc(sizeof(int) * 3);
     descriptors[0] = listenerFD;
     descriptors[1] = relayFD;
@@ -86,27 +102,35 @@ llcPeer_Run(WOLFSSL_CTX *listenerCtx, WOLFSSL_CTX *senderCtx, int listenerFD, in
 
     for (;;) {
         FD_ZERO(&recvfds);
-        FD_SET(listenerFD, &recvfds);
-        FD_SET(relayFD, &recvfds);
-        FD_SET(cliFD, &recvfds);
+        FD_SET(sp->listenerFD, &recvfds);
+        FD_SET(sp->relayFD, &recvfds);
+        FD_SET(sp->cliFD, &recvfds);
+        //        FD_SET(cliFD, &recvfds);
+        /*
         if (cliSocket > 0) {
             FD_SET(cliSocket, &recvfds);
         }
         if (relaySocket > 0) {
             FD_SET(relaySocket, &recvfds);
         }
+        */
 
         FD_ZERO(&errfds);
-        FD_SET(listenerFD, &errfds);
-        FD_SET(relayFD, &errfds);
-        FD_SET(cliFD, &errfds);
+        FD_SET(sp->listenerFD, &errfds);
+        FD_SET(sp->relayFD, &errfds);
+        FD_SET(sp->cliFD, &errfds);
 
-        select_ret = select(nfds, &recvfds, NULL, &errfds, NULL); // we don't care about errors for now
+        select_ret = select(nfds, &recvfds, NULL, &errfds, NULL);
+        // we don't care about errors (in errfds) for now
 
         if (select_ret >= 0) {
-            if (FD_ISSET(listenerFD, &recvfds)) { // activity on the listening socket, there's a new connection attempt, so go ahead with it.
-                int newlistenerFD = llcPeer_Connect(listenerFD);
-                WOLFSSL *ssl = wolfSSL_new(listenerCtx);
+            if (FD_ISSET(sp->listenerFD, &recvfds)) {
+                // activity on the listening socket, there's a new
+                // connection attempt, so go ahead with it.
+                int newlistenerFD = llcPeer_Connect(sp->listenerFD);
+//                WOLFSSL *ssl = wolfSSL_new(ctx);
+                WOLFSSL *ssl = NULL;
+>>>>>>> 2e3ec05b5f5b3cb0b59d45502349fe399b5ebd2f
                 if (ssl == NULL) {
                     printf("wolfSSL_new error.\n");
                 } else {
@@ -136,44 +160,17 @@ llcPeer_Run(WOLFSSL_CTX *listenerCtx, WOLFSSL_CTX *senderCtx, int listenerFD, in
                         // connected.... use wolfSSL_read and wolfSSL_write for IO
                     }
                 }
-            } else if (FD_ISSET(cliFD, &recvfds)) {
-                if ((cliSocket = accept(cliFD, NULL, NULL)) == -1) {
-                    perror("Error accepting the CLI connection");
-                }
-                fcntl(cliSocket, F_SETFL, O_NONBLOCK);
-                FD_SET(cliSocket, &recvfds);
-                if (cliSocket >= nfds) {
-                    nfds = cliSocket + 1;
-                }
-            } else if (FD_ISSET(relayFD, &recvfds)) {
-                if ((relaySocket = accept(relayFD, NULL, NULL)) == -1) {
-                    perror("Error accepting the CLI connection");
+            } else if (FD_ISSET(sp->cliFD, &recvfds)) {
+                rl_callback_read_char();
+            } else if (FD_ISSET(sp->relayFD, &recvfds)) {
+                if ((relaySocket = accept(sp->relayFD, NULL, NULL)) == -1) {
+                    perror("Error accepting the RELAY connection");
                 }
                 fcntl(relaySocket, F_SETFL, O_NONBLOCK);
                 FD_SET(relaySocket, &recvfds);
                 if (relaySocket >= nfds) {
                     nfds = relaySocket + 1;
                 }
-            } else if (FD_ISSET(cliSocket, &recvfds)) {
-                int rc = 0;
-                char buf[100];
-                while ((rc = read(cliSocket, buf, sizeof(buf))) > 0) {
-                    // TODO: do meaningful stuff with the data here
-                    printf("read %u bytes: %.*s\n", rc, rc, buf);
-                }
-                close(cliSocket);
-                FD_CLR(cliSocket, &recvfds);
-                cliSocket = 0;
-            } else if (FD_ISSET(relaySocket, &recvfds)) {
-                int rc = 0;
-                char buf[100];
-                while ((rc = read(relaySocket, buf, sizeof(buf))) > 0) {
-                    // TODO: do meaningful stuff with the data here
-                    printf("read %u bytes: %.*s\n", rc, rc, buf);
-                }
-                close(relaySocket);
-                FD_CLR(relaySocket, &recvfds);
-                relaySocket = 0;
             }
         } else {
             // pass: timeout
@@ -257,20 +254,20 @@ llcPeer_Connect(int listenFD)
 
     // WOLFSSL_CTX *clientContext = wolfSSL_CTX_new(wolfDTLSv1_2_client_method());
     // if (clientContext == NULL) {
-	//     fprintf(stderr, "wolfSSL_CTX_new error.\n");
-	//     return EXIT_FAILURE;
+        //     fprintf(stderr, "wolfSSL_CTX_new error.\n");
+        //     return EXIT_FAILURE;
     // }
     //
     // char *certs = "certs/ca-cert.pem";
     // int result = wolfSSL_CTX_load_verify_locations(clientContext, certs, 0);
     // if (result != SSL_SUCCESS) {
-	//     fprintf(stderr, "Error loading %s, please check the file.\n", certs);
-	//     return(EXIT_FAILURE);
+        //     fprintf(stderr, "Error loading %s, please check the file.\n", certs);
+        //     return(EXIT_FAILURE);
     // }
     //
     // WOLFSSL *ssl = wolfSSL_new(clientContext);
     // if (ssl == NULL) {
-	//     printf("unable to get ssl object");
+        //     printf("unable to get ssl object");
     //     return 1;
     // }
     //
@@ -300,59 +297,113 @@ llcPeer_Connect(int listenFD)
 }
 
 int
-main(int argc, char** argv)
+dtls_setup(char *host, WOLFSSL_CTX **ctx)
 {
-    if (argc != 4) {
-	    printf("usage: %s <IP address> <relay-name> <cli-name>\n", argv[0]);
-        return 1;
-    }
-
     char caCertLoc[] = "certs/ca-cert.pem";
     char servCertLoc[] = "certs/server-cert.pem";
     char servKeyLoc[] = "certs/server-key.pem";
 
-    const char *host = argv[1];
-
     wolfSSL_Debugging_ON();
     wolfSSL_Init();
 
-    WOLFSSL_CTX *peerListenerCtx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
-    if (peerListenerCtx == NULL) {
-        fprintf(stderr, "wolfSSL_CTX_new error.\n");
+#ifdef BUGGY
+    *ctx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
+    if (*ctx == NULL) {
+        printf("wolfSSL_CTX_new error.\n");
         return -1;
     }
 
-    WOLFSSL_CTX *peerClientCtx = wolfSSL_CTX_new(wolfDTLSv1_2_client_method());
-    if (peerClientCtx == NULL) {
-        fprintf(stderr, "wolfSSL_CTX_new error.\n");
+    if (wolfSSL_CTX_load_verify_locations(*ctx, caCertLoc, 0) != SSL_SUCCESS) {
+        printf("Error loading %s, please check the file.\n", caCertLoc);
+        return -1;
+    }
+    if (wolfSSL_CTX_use_certificate_file(*ctx, servCertLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
+        printf("Error loading %s, please check the file.\n", servCertLoc);
+        return -1;
+    }
+    if (wolfSSL_CTX_use_PrivateKey_file(*ctx, servKeyLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
+        printf("Error loading %s, please check the file.\n", servKeyLoc);
+        return -1;
+    }
+#endif
+
+   return llcPeer_CreateListener(*ctx);
+}
+
+int
+relay_setup(char *fifoname)
+{
+    int relayFD;
+    struct sockaddr_un relayAddressInfo;
+
+    unlink(fifoname);
+    memset(&relayAddressInfo, 0, sizeof(relayAddressInfo));
+    relayAddressInfo.sun_family = AF_UNIX;
+    strcpy(relayAddressInfo.sun_path, fifoname);
+
+    relayFD = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (relayFD < 0) {
+        printf("Failed to create a socket.");
         return -1;
     }
 
-    if (wolfSSL_CTX_load_verify_locations(peerListenerCtx, caCertLoc, 0) != SSL_SUCCESS) {
-        fprintf(stderr, "Error loading %s, please check the file.\n", caCertLoc);
-        return 1;
-    }
-    if (wolfSSL_CTX_load_verify_locations(peerClientCtx, caCertLoc, 0) != SSL_SUCCESS) {
-	    fprintf(stderr, "Error loading %s, please check the file.\n", certs);
-	    return(EXIT_FAILURE);
-    }
-    if (wolfSSL_CTX_use_certificate_file(peerListenerCtx, servCertLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
-        fprintf(stderr, "Error loading %s, please check the file.\n", servCertLoc);
-        return 1;
-    }
-    if (wolfSSL_CTX_use_PrivateKey_file(peerListenerCtx, servKeyLoc, SSL_FILETYPE_PEM) != SSL_SUCCESS) {
-        fprintf(stderr, "Error loading %s, please check the file.\n", servKeyLoc);
-        return 1;
+    if (bind(relayFD, (struct sockaddr *) &relayAddressInfo,
+                                                  sizeof(struct sockaddr_un))) {
+        printf("Failed to bind to CLI socket.");
+        return -1;
     }
 
+    if (listen(relayFD, 5) == -1) {
+        perror("listen error");
+        exit(-1);
+    }
+
+    fcntl(relayFD, F_SETFL, O_NONBLOCK);
+
+    return relayFD;
+}
+
+// ----------------------------------------------------------------------
+
+void readline_start(int linecnt);
+
+void
+cmd_doit(char *line)
+{
+    if (!llc_execute(line))
+        readline_start(linecnt);
+    else {
+        printf("\n* llc-cmd ends here.\n");
+        exit(0);
+    }
+}
+
+void
+readline_start(int linecnt)
+{
+    char prompt[20], *line;
+
+    sprintf(prompt, "llc %d> ", linecnt);
+    rl_callback_handler_install(prompt, cmd_doit);
+}
+
+int
+console_setup(char *fifoname)
+{
+    printf("ICN-LLC command console\n\n");
+    readline_start(0);
+
+    /*
+#ifdef XXX
     struct sockaddr_un cliAddressInfo;
+
     memset(&cliAddressInfo, 0, sizeof(cliAddressInfo));
     cliAddressInfo.sun_family = AF_UNIX;
-    strcpy(cliAddressInfo.sun_path, argv[3]);
+    strcpy(cliAddressInfo.sun_path, fifoname);
 
     int cliFD = socket(AF_UNIX, SOCK_STREAM, 0);
     if (cliFD < 0) {
-    	printf("Failed to create a socket.");
+            printf("Failed to create a socket.");
         return 1;
     }
 
@@ -367,41 +418,53 @@ main(int argc, char** argv)
     }
 
     fcntl(cliFD, F_SETFL, O_NONBLOCK);
+    */
+    return 0;
+}
 
-    struct sockaddr_un relayAddressInfo;
-    memset(&relayAddressInfo, 0, sizeof(relayAddressInfo));
-    relayAddressInfo.sun_family = AF_UNIX;
-    strcpy(relayAddressInfo.sun_path, argv[2]);
+// ----------------------------------------------------------------------
 
-    int relayFD = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (relayFD < 0) {
-        printf("Failed to create a socket.");
+int
+main(int argc, char** argv)
+{
+    struct session_s *sp = &theSession;
+//    int listenerFD, relayFD, cliFD;
+//    WOLFSSL_CTX *peerListenerCtx = NULL;
+
+    if (argc != 3) {
+        printf("usage: %s <relay-fifoname> <cli-fifoname>\n", argv[0]);
         return 1;
     }
 
-    if (bind(relayFD, (struct sockaddr *) &relayAddressInfo, sizeof(struct sockaddr_un))) {
-        printf("Failed to bind to CLI socket.");
-        return 1;
-    }
+    using_history();
+    nsroot = init();
 
-    if (listen(relayFD, 5) == -1) {
-        perror("listen error");
-        exit(-1);
-    }
+/*
+    listenerFD = dtls_setup(argv[1], &peerListenerCtx);
+    if (listenerFD < 0)
+        return listenerFD;
+*/
 
-    fcntl(relayFD, F_SETFL, O_NONBLOCK);
+    sp->relayFD = relay_setup(argv[1]);
+    if (sp->relayFD < 0)
+        return sp->relayFD;
 
-    int listenerFD = llcPeer_CreateListener(peerListenerCtx);
+    sp->cliFD = console_setup(argv[2]);
+
+    sp->listenerFD = llcPeer_CreateListener(peerListenerCtx);
     llcPeer_Run(peerListenerCtx, peerClientCtx, listenerFD, relayFD, cliFD);
+
 
     // WOLFSSL_SESSION *session = wolfSSL_get_session(ssl);
     // sslResume = wolfSSL_new(ctx);
 
     // wolfSSL_shutdown(ssl);
     // wolfSSL_free(ssl);
-    close(listenerFD);
-    close(cliFD);
-    close(relayFD);
+
+    close(sp->listenerFD);
+    close(sp->listenerFD);
+    //    close(sp->cliFD);
+    close(sp->relayFD);
 
     return 0;
 }

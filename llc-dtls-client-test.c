@@ -162,7 +162,7 @@ int main (int argc, char** argv)
 
     /* wolfSSL_Debugging_ON();*/
 
-    if ( (ctx = wolfSSL_CTX_new(wolfDTLSv1_2_client_method())) == NULL) {
+    if ((ctx = wolfSSL_CTX_new(wolfDTLSv1_2_client_method())) == NULL) {
 	    fprintf(stderr, "wolfSSL_CTX_new error.\n");
 	    return(EXIT_FAILURE);
     }

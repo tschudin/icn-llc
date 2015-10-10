@@ -1,6 +1,6 @@
 /* 
- * @f llc-cli.c
- * @b ICN-LLC - command line interface
+ * @f llc-cmd.c
+ * @b ICN-LLC - command execution (ASCII console for the time being)
  *
  * Copyright (C) 2015, Christian Tschudin, University of Basel
  *
@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -36,12 +37,16 @@ struct sexpr { // atom or list
         struct sexpr *list;
         int intval;
         char *strval;
+        void *data;
     } s;
+    int dataLen;
+    char *note;
 };
 
 #define SEXPR_LST 1
 #define SEXPR_INT 2
 #define SEXPR_STR 3
+#define SEXPR_BIN 4
 
 struct nsnode;
 typedef int (*ns_callback)(struct nsnode*, struct sexpr *old);
@@ -52,6 +57,12 @@ struct nsnode { // namespace node
     char *relname;
     struct sexpr *val;
     ns_callback set_cb;
+/*
+    char *note;
+    void *data;
+    int dataLen;
+*/
+    int topCnt;
 };
 
 struct nsnode *nsroot;
@@ -136,8 +147,13 @@ struct sexpr*
 sexpr_fromStr(char *s)
 {
     char *cp = s;
+    struct sexpr *e = sexpr_parse(&cp);
 
-    return sexpr_parse(&cp);
+    while (*cp && isspace(*cp)) cp++;
+    if (*cp)
+        e->note = strdup(cp);
+
+    return e;
 }
 
 // write a sexpr struct into a string (malloced)
@@ -156,6 +172,9 @@ sexpr_toStr(char *buf, int buflen, struct sexpr *e)
     case SEXPR_STR:
         buf += sprintf(buf, "\"%s\"", e->s.strval);
         break;
+    case SEXPR_BIN:
+        buf += sprintf(buf, "[%d Bytes]", e->dataLen);
+        break;
     case SEXPR_LST:
         buf += sprintf(buf, "(");
         for (e = e->s.list; e; e = e->next) {
@@ -168,6 +187,9 @@ sexpr_toStr(char *buf, int buflen, struct sexpr *e)
     default:
         return 0;
     }
+
+    if (e->note)
+        buf += sprintf(buf, "  %s", e->note);
     return buf - start;
 }
 
@@ -177,8 +199,12 @@ sexpr_free(struct sexpr *e)
 {
     if (!e)
         return;
+    if (e->note)
+        free(e->note);
     if (e->type == SEXPR_STR && e->s.strval)
         free(e->s.strval);
+    else if (e->type == SEXPR_BIN && e->s.data)
+        free(e->s.data);
     else if (e->type == SEXPR_LST) {
         while (e->s.list) {
             struct sexpr *e2 = e->s.list->next;
@@ -212,12 +238,28 @@ ns_addChild(struct nsnode *parent, char *name)
     return child;
 }
 
+// add a new child node to a namespace node
+struct nsnode*
+ns_addUniqueChild(struct nsnode *parent)
+{
+    char buf[10];
+
+    parent->topCnt++;
+    sprintf(buf, "%d", parent->topCnt);
+    return ns_addChild(parent, buf);
+}
+
 // assign a new value to a namespace node, trigger the set callback
 void
 ns_setExpr(struct nsnode *n, struct sexpr *e)
 {
     struct sexpr *old = n->val;
-    
+
+/*
+    free(n->note);
+    n->note = e->note ? strdup(e->note) : NULL;
+*/
+
     n->val = e;
     if (n->set_cb)
         (n->set_cb)(n, old);
@@ -416,7 +458,7 @@ init(void)
 
     n2 = ns_addChild(n, "info");
     n3 = ns_addChild(n2, "version");
-    e = sexpr_fromStr("\"0.01\"");
+    e = sexpr_fromStr("\"0.01\" \"this is a comment\"");
     ns_setExpr(n3, e);
 
     n2 = ns_addChild(n, "key");
@@ -436,9 +478,9 @@ help(FILE *f)
 
     fprintf(f,
            "Available commands:\n"
-            "  mk cert FILE\n"
+            "  mk cert FILE [NOTE]\n"
             "  mk dev PARAMS\n"
-            "  mk key FILE\n"
+            "  mk key FILE [NOTE]\n"
             "  mk link LOCALDEV REMOTEDEV\n"
             "  mk pipe LINK LOCALDEV REMOTESRVC\n"
             "  mk srvc SRVCNAME LOCALDEV\n"
@@ -446,12 +488,51 @@ help(FILE *f)
             "  set NAME VALUE\n"
             "  rm NAME\n"
             "  rpc LINK COMMAND\n\n"
-            "  help\n"
-            "  list\n"
             "  dump\n"
             "  peek OFFS LEN\n"
-            "  quit\n"
+            "  help    produces this output\n"
+            "  list    produces variable tree\n"
+            "  quit    quits\n"
+            "  var     lists the stored return values\n"
         );
+}
+
+char*
+cmd_helperLoadFromFile(char *path)
+{
+    char *expr = strtok(NULL, "\n");
+    struct sexpr *e = expr ? sexpr_fromStr(expr) : NULL;
+    struct nsnode *n;
+    struct stat st;
+    int fd;
+    void *bin;
+
+    if (!e || e->type != SEXPR_STR) {
+        RETURN_RESULT(RPC_FAIL, "invalid expression");
+        return NULL;
+    }
+    if (stat(e->s.strval, &st)) {
+        RETURN_RESULT(RPC_FAIL, "file access problem");
+        return NULL;
+    }
+    fd = open(e->s.strval, O_RDONLY);
+    bin = malloc(st.st_size);
+    read(fd, bin, st.st_size);
+    close(fd);
+    free(e->s.strval);
+    e->type = SEXPR_BIN;
+    e->s.data = bin;
+    e->dataLen = st.st_size;
+
+    n = ns_mkNode(path);
+    n = ns_addUniqueChild(n);
+    ns_setExpr(n, e);
+/*
+    n->data = bin;
+    n->dataLen = st.st_size;
+*/
+    RETURN_RESULT(RPC_OK, NULL);
+    return ns_node2path(namebuf, sizeof(namebuf), n);
 }
 
 char*
@@ -469,8 +550,11 @@ cmd_mk(char *line)
         }
         RETURN_RESULT(RPC_FAIL, "?");
         return NULL;
+    } else if (!strcmp(kind, "cert")) {
+        return cmd_helperLoadFromFile("/cert");
+    } else if (!strcmp(kind, "key")) {
+        return cmd_helperLoadFromFile("/key");
     }
-    
     
     RETURN_RESULT(RPC_FAIL, "mk not implemented");
     return NULL;
@@ -565,6 +649,63 @@ cmd_peek(char *line)
     RETURN_RESULT(RPC_FAIL, "peek not implemented");
 }
 
+static int linecnt;
+
+int
+llc_execute(char *line)
+{
+    char *verb, *val;
+    
+    if (!line)
+        return 0;
+    
+    for (verb = line; isspace(*verb); verb++);
+    if (!*verb || *verb == '#') // empty line or comment
+        return 0;
+
+    add_history(line);
+
+    verb = strtok(line, " \t\n");
+    val = NULL;
+    if (!strcmp(verb, "mk"))
+        val = cmd_mk(line);
+    else if (!strcmp(verb, "get"))
+        val = cmd_get(line);
+    else if (!strcmp(verb, "set"))
+        val = cmd_set(line);
+    else if (!strcmp(verb, "rm"))
+        cmd_rm(line);
+    else if (!strcmp(verb, "rpc"))
+        cmd_rpc(line);
+    else if (!strcmp(verb, "help"))
+        help(NULL);
+    else if (!strcmp(verb, "list"))
+        cmd_list(0, nsroot);
+    else if (!strcmp(verb, "dump"))
+        cmd_dump(line);
+    else if (!strcmp(verb, "peek"))
+        cmd_peek(line);
+    else if (!strcmp(verb, "var")) {
+        int i;
+        for (i = -10; i < 0; i++) {
+            char *s = ring_getValueByLN(linecnt + i);
+            printf(" $%d is %s\n", linecnt + i, s);
+        }
+    } else if (!strcmp(verb, "quit"))
+        return -1;
+    else {
+        fprintf(stderr, "unknown verb \"%s\", "
+                "see full list with \"help\"\n", verb);
+    }
+
+    if (val) {
+        ring_addValue(linecnt, val);
+        linecnt++;
+    }
+    return 0;
+}
+
+#ifdef XXX
 int
 main(int argc, char **argv)
 {
@@ -582,54 +723,11 @@ main(int argc, char **argv)
 
         if (!line)
             break;
-        for (verb = line; isspace(*verb); verb++);
-        if (!*verb || *verb == '#') // empty line or comment
-            continue;
-
-        add_history(line);
-
-        verb = strtok(line, " \t\n");
-        val = NULL;
-        if (!strcmp(verb, "mk"))
-            val = cmd_mk(line);
-        else if (!strcmp(verb, "get"))
-            val = cmd_get(line);
-        else if (!strcmp(verb, "set"))
-            val = cmd_set(line);
-        else if (!strcmp(verb, "rm"))
-            cmd_rm(line);
-        else if (!strcmp(verb, "rpc"))
-            cmd_rpc(line);
-        else if (!strcmp(verb, "help"))
-            help(NULL);
-        else if (!strcmp(verb, "list"))
-            cmd_list(0, nsroot);
-        else if (!strcmp(verb, "dump"))
-            cmd_dump(line);
-        else if (!strcmp(verb, "peek"))
-            cmd_peek(line);
-        else if (!strcmp(verb, "quit"))
-            break;
-        else {
-            fprintf(stderr, "unknown verb \"%s\", "
-                    "see full list with \"help\"\n", verb);
-        }
-        free(line);
-
-        ring_addValue(linecnt, val);
-
-        {
-            int i;
-            for (i = -10; i <= 0; i++) {
-                char *s = ring_getValueByLN(linecnt + i);
-                printf(" $%d is %s\n", linecnt + i, s);
-            }
-        }
-        linecnt++;
     }
 
     printf("\n* llc-cli ends here.\n");
     return 0;
 }
+#endif
 
 // eof
