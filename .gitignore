@@ -4,4 +4,7 @@ llc-cli
 llc-dtls-client-test
 llc-dtls-test
 llc-peer
+llc-test-client
+llc-test-client2
 server
+llc-peer.dSYM/
