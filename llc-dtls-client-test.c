@@ -25,10 +25,10 @@
  */
 
 #include <unistd.h>
+#include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <wolfssl/options.h>
 #include <netdb.h>
 #include <signal.h>
 #include <sys/socket.h>
