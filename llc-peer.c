@@ -130,7 +130,6 @@ llcPeer_Run(struct session_s *sp)
                 int newlistenerFD = llcPeer_Connect(sp->listenerFD);
 //                WOLFSSL *ssl = wolfSSL_new(ctx);
                 WOLFSSL *ssl = NULL;
->>>>>>> 2e3ec05b5f5b3cb0b59d45502349fe399b5ebd2f
                 if (ssl == NULL) {
                     printf("wolfSSL_new error.\n");
                 } else {
