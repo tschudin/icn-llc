@@ -12,6 +12,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#include <stdio.h>
+#include <strings.h>
+#include <ctype.h>
+#include <stdarg.h>
 
 #include <wolfssl/ssl.h>
 #include <wolfssl/options.h>
@@ -35,7 +41,6 @@ enum {
     SELECT_ERROR_READY
 };
 
-
 struct session_s {
     int cliFD;
     int relayFD;
@@ -45,15 +50,23 @@ struct session_s {
 } theSession;
 
 static int
-max(int *x, int len)
-{
-    int maxNum = x[0];
-    for (int i = 1; i < len; i++) {
-        if (x[i] > maxNum) {
-            maxNum = x[i];
+_max(int maxNum, va_list varargs) {
+    for (int *num = va_arg(varargs, int *); num != NULL; num = va_arg(varargs, int *)) {
+        if (*num > maxNum) {
+            maxNum = *num;
         }
     }
     return maxNum;
+}
+
+static int
+max(int maxNum, ...)
+{
+    va_list arglist;
+    va_start(arglist, maxNum);
+    int max = _max(maxNum, arglist);
+    va_end(arglist);
+    return max;
 }
 
 static int
@@ -84,21 +97,17 @@ llcPeer_Run(struct session_s *sp)
 {
     int select_ret;
     fd_set recvfds, errfds;
-    int nfds = max(sp->listenerFD, sp->relayFD, sp->cliFD) + 1;
 
     // There is only one CLI socket.
     int cliSocket = 0;
 
     // There can be many peer relay sockets.
     int *relaySockets = (int *) malloc(sizeof(int) * 1);
+    int numRelays = 0;
     relaySockets[0] = 0;
 
-    //
-    int *descriptors = (int *) malloc(sizeof(int) * 3);
-    descriptors[0] = listenerFD;
-    descriptors[1] = relayFD;
-    descriptors[2] = cliFD;
-    int nfds = max(descriptors, 3) + 1;
+    // Set the max socket descriptor for the select call
+    int nfds = max(sp->listenerFD, sp->relayFD, sp->cliFD) + 1;
 
     for (;;) {
         FD_ZERO(&recvfds);
@@ -162,14 +171,21 @@ llcPeer_Run(struct session_s *sp)
             } else if (FD_ISSET(sp->cliFD, &recvfds)) {
                 rl_callback_read_char();
             } else if (FD_ISSET(sp->relayFD, &recvfds)) {
+                int relaySocket = 0;
                 if ((relaySocket = accept(sp->relayFD, NULL, NULL)) == -1) {
                     perror("Error accepting the RELAY connection");
                 }
+
                 fcntl(relaySocket, F_SETFL, O_NONBLOCK);
                 FD_SET(relaySocket, &recvfds);
                 if (relaySocket >= nfds) {
                     nfds = relaySocket + 1;
                 }
+
+                // Save the relay socket in the list
+                relaySockets = realloc(relaySockets, (numRelays + 1) * sizeof(int));
+                relaySockets[numRelays] = relaySocket;
+                numRelays++;
             }
         } else {
             // pass: timeout
@@ -199,7 +215,7 @@ llcPeer_CreateListener(WOLFSSL_CTX *context)
         return 1;
     }
 
-    printf("Socket allocated\n");
+    printf("Socket allocated for the incoming DTLS connections\n");
 
     llcPeer_SetSocketNonBlocking(&listenFD);
 
@@ -427,31 +443,32 @@ int
 main(int argc, char** argv)
 {
     struct session_s *sp = &theSession;
-//    int listenerFD, relayFD, cliFD;
-//    WOLFSSL_CTX *peerListenerCtx = NULL;
+    WOLFSSL_CTX *peerListenerCtx = NULL;
 
     if (argc != 3) {
         printf("usage: %s <relay-fifoname> <cli-fifoname>\n", argv[0]);
         return 1;
     }
 
+    // Namespace code
     using_history();
     nsroot = init();
 
-/*
-    listenerFD = dtls_setup(argv[1], &peerListenerCtx);
-    if (listenerFD < 0)
+    int listenerFD = dtls_setup(argv[1], &peerListenerCtx);
+    if (listenerFD < 0) {
         return listenerFD;
-*/
+    }
 
     sp->relayFD = relay_setup(argv[1]);
-    if (sp->relayFD < 0)
+    if (sp->relayFD < 0) {
         return sp->relayFD;
+    }
 
     sp->cliFD = console_setup(argv[2]);
 
     sp->listenerFD = llcPeer_CreateListener(peerListenerCtx);
-    llcPeer_Run(peerListenerCtx, peerClientCtx, listenerFD, relayFD, cliFD);
+    // llcPeer_Run(peerListenerCtx, peerClientCtx, listenerFD, relayFD, cliFD);
+    llcPeer_Run(sp);
 
 
     // WOLFSSL_SESSION *session = wolfSSL_get_session(ssl);
@@ -461,8 +478,7 @@ main(int argc, char** argv)
     // wolfSSL_free(ssl);
 
     close(sp->listenerFD);
-    close(sp->listenerFD);
-    //    close(sp->cliFD);
+    close(sp->cliFD);
     close(sp->relayFD);
 
     return 0;
