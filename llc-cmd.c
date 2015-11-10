@@ -1,4 +1,4 @@
-/* 
+/*
  * @f llc-cmd.c
  * @b ICN-LLC - command execution (ASCII console for the time being)
  *
@@ -26,6 +26,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -223,7 +225,7 @@ struct nsnode*
 ns_addChild(struct nsnode *parent, char *name)
 {
     struct nsnode *child = calloc(1, sizeof(struct nsnode));
-    
+
     child->parent = parent;
     child->relname = strdup(name);
     if (!parent->children) {
@@ -355,7 +357,7 @@ ns_node2path(char *buf, int len, struct nsnode *n)
     len--;
     cp =  buf + len;
     *cp = '\0';
-    
+
     while (n) {
         if (n->relname) {
             int i = strlen(n->relname);
@@ -435,7 +437,7 @@ ring_expand(char *str)
         if (!str[pos])
             break;
     }
-    
+
     return str;
 }
 
@@ -449,7 +451,7 @@ init(void)
     struct sexpr *e;
 
     n->next = n->prev = n;
-    
+
     n2 = ns_addChild(n, "cert");
 
     n2 = ns_addChild(n, "dev");
@@ -555,7 +557,7 @@ cmd_mk(char *line)
     } else if (!strcmp(kind, "key")) {
         return cmd_helperLoadFromFile("/key");
     }
-    
+
     RETURN_RESULT(RPC_FAIL, "mk not implemented");
     return NULL;
 }
@@ -655,10 +657,10 @@ int
 llc_execute(char *line)
 {
     char *verb, *val;
-    
+
     if (!line)
         return 0;
-    
+
     for (verb = line; isspace(*verb); verb++);
     if (!*verb || *verb == '#') // empty line or comment
         return 0;
@@ -705,7 +707,7 @@ llc_execute(char *line)
     return 0;
 }
 
-#ifdef XXX
+#ifdef BUILD
 int
 main(int argc, char **argv)
 {
@@ -723,6 +725,8 @@ main(int argc, char **argv)
 
         if (!line)
             break;
+
+        llc_execute(line);
     }
 
     printf("\n* llc-cli ends here.\n");
