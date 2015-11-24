@@ -149,7 +149,7 @@ int main (int argc, char** argv)
     WOLFSSL_CTX* 	ctx = 0;
     WOLFSSL* 		sslResume = 0;
     WOLFSSL_SESSION*	session = 0;
-    char            cert_array[] = "certs/ca-cert.pem";
+    char            cert_array[] = "../certs/ca-cert.pem";
     char*           certs = cert_array;
     char*           srTest = "testing session resume";
 
@@ -197,6 +197,8 @@ int main (int argc, char** argv)
     wolfSSL_set_using_nonblock(ssl, 1);
     fcntl(sockfd, F_SETFL, O_NONBLOCK);
     NonBlockingDTLS_Connect(ssl);
+
+    printf("Connected!\n");
 
     DatagramClient(ssl);
     while ( (wolfSSL_write(ssl, srTest, sizeof(srTest))) != sizeof(srTest)) {

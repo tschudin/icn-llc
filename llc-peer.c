@@ -46,6 +46,13 @@ typedef enum {
     SELECT_CLI_ERROR
 } SelectResult;
 
+enum {
+    DTLS_SELECT_FAIL,
+    DTLS_TIMEOUT,
+    DTLS_RECV_READY,
+    DTLS_ERROR_READY
+};
+
 struct session_s {
     int cliFD;
     int relayFD;
@@ -75,6 +82,32 @@ max(int maxNum, ...)
     return max;
 }
 
+int dtls_select(int socketfd, int toSec)
+{
+    int result;
+    int nfds = socketfd + 1;
+    fd_set  recvfds, errfds;
+    struct timeval timeout = { (toSec > 0) ? toSec : 0, 0};
+
+    FD_ZERO(&recvfds);
+    FD_SET(socketfd, &recvfds);
+    FD_ZERO(&errfds);
+    FD_SET(socketfd, &errfds);
+
+    result = select(nfds, &recvfds, NULL, &errfds, &timeout);
+
+    if (result == 0)
+        return DTLS_TIMEOUT;
+    else if (result > 0) {
+        if (FD_ISSET(socketfd, &recvfds))
+            return DTLS_RECV_READY;
+        else if(FD_ISSET(socketfd, &errfds))
+            return DTLS_ERROR_READY;
+    }
+
+    return DTLS_SELECT_FAIL;
+}
+
 static SelectResult
 llcPeer_ListenSelect(int listenerFD, int relayFD, int cliFD, int nfds,
     fd_set recvfds, fd_set errfds, struct timeval timeout)
@@ -101,12 +134,59 @@ llcPeer_ListenSelect(int listenerFD, int relayFD, int cliFD, int nfds,
     return SELECT_FAIL;
 }
 
+static int cleanup = 0;
+
+int NonBlockingSSL_Accept(WOLFSSL* ssl)
+{
+    int select_ret;
+    int currTimeout = 1;
+    int ret = wolfSSL_accept(ssl);
+    int error = wolfSSL_get_error(ssl, 0);
+    int listenfd = (int)wolfSSL_get_fd(ssl);
+
+    while (ret != SSL_SUCCESS &&
+                (error == SSL_ERROR_WANT_READ ||
+                 error == SSL_ERROR_WANT_WRITE)) {
+        if (error == SSL_ERROR_WANT_READ)
+            printf("... server would read block\n");
+        else
+            printf("... server would write block\n");
+
+        currTimeout = wolfSSL_dtls_get_current_timeout(ssl);
+        select_ret = dtls_select(listenfd, currTimeout);
+
+        if ((select_ret == DTLS_RECV_READY) ||
+                (select_ret == DTLS_ERROR_READY)) {
+            ret = wolfSSL_accept(ssl);
+            error = wolfSSL_get_error(ssl, 0);
+        }
+        else if (select_ret == DTLS_TIMEOUT && !wolfSSL_dtls(ssl)) {
+            error = SSL_ERROR_WANT_READ;
+        }
+        else if (select_ret == DTLS_TIMEOUT && wolfSSL_dtls(ssl) &&
+                wolfSSL_dtls_got_timeout(ssl) >= 0) {
+            error = SSL_ERROR_WANT_READ;
+        }
+        else {
+            error = SSL_FATAL_ERROR;
+        }
+    }
+    if (ret != SSL_SUCCESS) {
+        printf("SSL_accept failed.\n");
+        return 1;
+    }
+
+    return 0;
+}
+
 static void
 llcPeer_Run(struct session_s *sp)
 {
     fd_set recvfds, errfds;
 
     int relaySocket = 0;
+
+    // TODO: rename some of these -- the listenerFD is really the DTLS server listener FD
 
     // Set the max socket descriptor for the select call
     int nfds = max(sp->listenerFD, sp->relayFD, sp->cliFD, 0) + 1;
@@ -146,33 +226,34 @@ llcPeer_Run(struct session_s *sp)
 
                 int listenfd = (int)wolfSSL_get_fd(ssl);
                 printf("DTLS listening FDs = %d %d\n", newlistenerFD, listenfd);
+                NonBlockingSSL_Accept(ssl);
 
                 // We received something from the given socket, now listen for
                 // the incoming DTLS connection and perform the handshake
-                fd_set listenfds;
-                FD_ZERO(&listenfds);
-                FD_SET(newlistenerFD, &listenfds);
-                struct timeval timeout = { 1, 0 };
-                int ret = -1;
-                int error = -1;
-
-                // Wait 5 seconds for the connection to complete.
-                for (int i = 0; i < 5; i++) {
-                    int result = select(listenfd + 1, &listenfds, NULL, NULL, &timeout);
-                    if (result > 0 && FD_ISSET(listenfd, &listenfds)) {
-                        error = wolfSSL_get_error(ssl, 0);
-                        ret = wolfSSL_accept(ssl);
-                        break;
-                    }
-                }
-
-                if (ret == -1 && error == -1) {
-                    // timeout
-                } else {
-                    printf("Connected to incoming DTLS client with socket FD %d\n", newlistenerFD);
-                    // NOTE: at this point we have a SA with the peer.
-                    // NOTE: we can being reading with recvLen = wolfSSL_read(ssl, buff, sizeof(buff)-1);, e.g.
-                }
+//                fd_set listenfds;
+//                FD_ZERO(&listenfds);
+//                FD_SET(newlistenerFD, &listenfds);
+//                struct timeval timeout = { 1, 0 };
+//                int ret = -1;
+//                int error = -1;
+//
+//                // Wait 5 seconds for the connection to complete.
+//                for (int i = 0; i < 5; i++) {
+//                    int result = select(listenfd + 1, &listenfds, NULL, NULL, &timeout);
+//                    if (result > 0 && FD_ISSET(listenfd, &listenfds)) {
+//                        error = wolfSSL_get_error(ssl, 0);
+//                        ret = wolfSSL_accept(ssl);
+//                        break;
+//                    }
+//                }
+//
+//                if (ret == -1 && error == -1) {
+//                    // timeout
+//                } else {
+//                    printf("Connected to incoming DTLS client with socket FD %d\n", newlistenerFD);
+//                    // NOTE: at this point we have a SA with the peer.
+//                    // NOTE: we can being reading with recvLen = wolfSSL_read(ssl, buff, sizeof(buff)-1);, e.g.
+//                }
             }
         } else if (select_ret == SELECT_RELAY_READY) {
             if ((relaySocket = accept(sp->relayFD, NULL, NULL)) == -1) {

@@ -126,6 +126,9 @@ int AwaitDGram(WOLFSSL_CTX* ctx)
         wolfSSL_set_fd(ssl, clientfd);
 
         wolfSSL_set_using_nonblock(ssl, 1);
+
+        // OK up to here.
+
         cont = NonBlockingSSL_Accept(ssl);
 
         if (cont != 0) {

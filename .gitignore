@@ -1,6 +1,7 @@
 client
 dtls
 llc-cli
+llc-cmd
 llc-dtls-client-test
 llc-dtls-test
 llc-peer
